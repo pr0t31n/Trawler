@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -56,9 +56,32 @@ _VP_TARGET = "__VANTAGE_TARGET__:"
 _VP_PORT   = "__VANTAGE_PORT__:"
 
 # ── Tooling discovery ─────────────────────────────────────────────────────────
-TSHARK  = shutil.which("tshark")
-EDITCAP = shutil.which("editcap")
-CAPINFOS = shutil.which("capinfos")
+# When Trawler runs under Vantage's daemon (no interactive PATH), shutil.which
+# misses Wireshark binaries that were installed via the macOS .app bundle, the
+# Homebrew/Apple-Silicon paths, or Windows Program Files. Fall back to a list
+# of well-known install locations after the PATH lookup fails.
+def _find_tool(name: str) -> "str | None":
+    p = shutil.which(name)
+    if p:
+        return p
+    candidates = (
+        f"/Applications/Wireshark.app/Contents/MacOS/{name}",   # macOS .app
+        f"/opt/homebrew/bin/{name}",                              # Apple Silicon brew
+        f"/usr/local/bin/{name}",                                  # Intel brew / legacy
+        f"/usr/bin/{name}",                                        # apt
+        f"/usr/sbin/{name}",
+        f"/usr/local/sbin/{name}",
+        f"C:/Program Files/Wireshark/{name}.exe",                  # Windows
+        f"C:/Program Files (x86)/Wireshark/{name}.exe",
+    )
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+TSHARK   = _find_tool("tshark")
+EDITCAP  = _find_tool("editcap")
+CAPINFOS = _find_tool("capinfos")
 
 # ── Console / Vantage protocol emitter ────────────────────────────────────────
 class VC:
@@ -1147,7 +1170,13 @@ def main() -> int:
     args = ap.parse_args()
 
     if not TSHARK:
-        VC.error("tshark not on PATH — install Wireshark CLI tools first"); return 1
+        VC.error(
+            "tshark not found. Searched PATH and standard install locations "
+            "(/Applications/Wireshark.app/Contents/MacOS/, /opt/homebrew/bin/, "
+            "/usr/local/bin/, /usr/bin/, C:/Program Files/Wireshark/). Install "
+            "Wireshark CLI tools (`apt install wireshark-common` / `brew install "
+            "wireshark` / `choco install wireshark`) then re-run.")
+        return 1
 
     om = OutputManager(args.output_dir, scope=args.scope)
 
