@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -199,8 +199,10 @@ LEDGER_FIELDS = [
     "x509sat.uTF8String","x509sat.printableString",
     # dns / mdns
     "dns.qry.name","dns.flags.response","dns.resp.name",
-    # dhcp (bootp)
-    "bootp.option.hostname","bootp.option.vendor_class_id","bootp.option.dhcp",
+    # dhcp — modern Wireshark renamed bootp.* to dhcp.* (the field-set
+    # change shipped in Wireshark 3.x and is the only spelling tshark 4.x
+    # accepts as a -e extractor).
+    "dhcp.option.hostname","dhcp.option.vendor_class_id","dhcp.option.dhcp",
     # mdns
     # (mdns rides on dns.qry.name with port 5353; we infer from udp.dstport)
     # arp
@@ -209,13 +211,15 @@ LEDGER_FIELDS = [
     "lldp.tlv.system.name","lldp.tlv.system.desc",
     # smb / smbv1
     "smb.cmd","smb2.cmd",
-    # llmnr / nbt-ns
-    "llmnr.flags","nbns.flags","nbns.name",
-    # ssdp
-    "ssdp.method",
+    # llmnr / nbt-ns — LLMNR has no dedicated field set (tshark dissects it via
+    # the DNS dissector); detect protocol presence via frame.protocols. NBT-NS
+    # has its own flags field.
+    "nbns.flags","nbns.name",
+    # ssdp — also no dedicated field set (tshark dissects via the HTTP-over-UDP
+    # dissector); detect via frame.protocols.
     # cleartext protocols
     "ftp.request.command","telnet.data","http.host","http.request.uri",
-    "http.authbasic","snmp.community","ldap.bindRequest",
+    "http.authbasic","snmp.community","ldap.bindRequest_element",
 ]
 
 def extract_ledger(pcap: Path) -> list[dict]:
@@ -651,7 +655,7 @@ def ext_check_dhcp_hostname(ledger, target, om):
     hostnames: set[str] = set()
     for r in ledger:
         # DHCP source 0.0.0.0 or assigned IP; we don't always know target before lease
-        h = r.get("bootp.option.hostname")
+        h = r.get("dhcp.option.hostname")
         if h and (r.get("ip.src") in (target, "0.0.0.0") or h):
             hostnames.add(h)
     # Match against any hostname; if exactly the target appeared in DHCP, flag
@@ -790,7 +794,10 @@ def int_check_smbv1(ledger, target, om):
     )
 
 def int_check_llmnr_nbtns(ledger, target, om):
-    seen_llmnr = any(r.get("llmnr.flags") and target in (r.get("ip.src"), r.get("ip.dst"))
+    # LLMNR has no dedicated tshark field set — it rides on the DNS dissector.
+    # Detect via frame.protocols containing 'llmnr'. NBT-NS has its own flags.
+    seen_llmnr = any("llmnr" in (r.get("frame.protocols") or "").lower()
+                     and target in (r.get("ip.src"), r.get("ip.dst"))
                      for r in ledger)
     seen_nbtns = any(r.get("nbns.flags") and target in (r.get("ip.src"), r.get("ip.dst"))
                      for r in ledger)
@@ -824,9 +831,12 @@ def int_check_llmnr_nbtns(ledger, target, om):
     )
 
 def int_check_ssdp(ledger, target, om):
+    # SSDP is HTTP-over-UDP (port 1900); tshark dissects it via the HTTP
+    # dissector and exposes it through frame.protocols rather than a
+    # dedicated ssdp.* field set.
     peers: set[str] = set()
     for r in ledger:
-        if not r.get("ssdp.method"): continue
+        if "ssdp" not in (r.get("frame.protocols") or "").lower(): continue
         if target in (r.get("ip.src"), r.get("ip.dst")):
             peer = r.get("ip.dst") if r.get("ip.src") == target else r.get("ip.src")
             if peer: peers.add(peer)
@@ -1066,7 +1076,11 @@ def int_check_http_basic_auth(ledger, target, om):
     )
 
 def int_check_ldap_cleartext(ledger, target, om):
-    seen = any(r.get("ldap.bindRequest") and target in (r.get("ip.src"), r.get("ip.dst"))
+    # tshark exposes LDAP bind requests as 'ldap.bindRequest_element' (the
+    # ASN.1 sequence element wrapper). The bare 'ldap.bindRequest' name does
+    # not exist as an extractable field.
+    seen = any(r.get("ldap.bindRequest_element") and
+               target in (r.get("ip.src"), r.get("ip.dst"))
                for r in ledger)
     if not seen: return
     om.add_finding(
