@@ -1,0 +1,2 @@
+# Trawler — stdlib-only for v1
+# External tooling (tshark, editcap, capinfos) installed via install.py
