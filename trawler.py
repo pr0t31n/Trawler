@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -253,10 +253,20 @@ def extract_ledger(pcap: Path) -> list[dict]:
 class OutputManager:
     _findings_lock = threading.Lock()
 
-    def __init__(self, root: str, scope: str = "int") -> None:
+    _PRIVATE_IP_RE = re.compile(
+        r'\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+        r'|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'
+        r'|192\.168\.\d{1,3}\.\d{1,3}'
+        r'|169\.254\.\d{1,3}\.\d{1,3}'
+        r'|127\.\d{1,3}\.\d{1,3}\.\d{1,3})\b'
+    )
+
+    def __init__(self, root: str, scope: str = "int",
+                 include_internal: bool = False) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.scope = scope
+        self.include_internal = bool(include_internal)
         self.findings_json   = self.root / "findings.json"
         self.findings_csv    = self.root / "findings.csv"
         self.summary_json    = self.root / "summary.json"
@@ -308,6 +318,17 @@ class OutputManager:
         }
         self.meta_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
+    def _redact_internal_ips(self, text: str, target_ip: str) -> str:
+        """When include_internal is False, replace any RFC1918/loopback/link-
+        local IPv4 in `text` with '[internal]' — except the target IP itself,
+        which is preserved because the finding is ABOUT it."""
+        if self.include_internal or not text:
+            return text
+        def _sub(m):
+            ip = m.group(0)
+            return ip if ip == target_ip else "[internal]"
+        return self._PRIVATE_IP_RE.sub(_sub, text)
+
     def add_finding(self, *, catalogue_id: str, title: str, ip: str,
                     port: int, risk: str, description: str, impact: str,
                     remediation: str, affected: str, output: str = "",
@@ -315,6 +336,9 @@ class OutputManager:
                     sources: str = "trawler", phase: str = "analysis",
                     hostname: str = "", command: str = "",
                     cves: str = "", owasp: str = "", nist: str = "") -> None:
+        affected    = self._redact_internal_ips(affected,    ip)
+        output      = self._redact_internal_ips(output,      ip)
+        description = self._redact_internal_ips(description, ip)
         entry = {
             "id":              str(uuid.uuid4()),
             "tool":            "trawler",
@@ -1192,7 +1216,8 @@ def main() -> int:
             "wireshark` / `choco install wireshark`) then re-run.")
         return 1
 
-    om = OutputManager(args.output_dir, scope=args.scope)
+    om = OutputManager(args.output_dir, scope=args.scope,
+                       include_internal=args.include_internal)
 
     target_list = []
     if args.target:
