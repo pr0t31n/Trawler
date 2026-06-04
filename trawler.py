@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.0.3"
+VERSION = "1.1.0"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -199,6 +199,7 @@ LEDGER_FIELDS = [
     "x509sat.uTF8String","x509sat.printableString",
     # dns / mdns
     "dns.qry.name","dns.flags.response","dns.resp.name",
+    "dns.a","dns.aaaa",
     # dhcp — modern Wireshark renamed bootp.* to dhcp.* (the field-set
     # change shipped in Wireshark 3.x and is the only spelling tshark 4.x
     # accepts as a -e extractor).
@@ -769,6 +770,172 @@ def ext_check_dns_suffix_appending(ledger, target, om):
         nist="SC-20 Secure Name/Address Resolution; SI-10 Input Validation",
     )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Defensive baseline rule — outbound protocol / destination catalogue
+# Added in v1.1.0.  Emits one Informational finding per target listing every
+# unique (destination, protocol, TLS version) triple observed outbound.  Acts
+# as the documented network-baseline allow-list for the device.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# legacy version field → human label.  TLS 1.3 advertises 0x0303 as the
+# legacy_version in the ServerHello and the real version in the
+# supported_versions extension (0x0304).
+_TLS_VER_LABEL = {
+    "0x0300": "SSL 3.0",
+    "0x0301": "TLS 1.0",
+    "0x0302": "TLS 1.1",
+    "0x0303": "TLS 1.2",
+    "0x0304": "TLS 1.3",
+}
+
+def _tls_label(legacy: str, supported: str) -> str:
+    """Resolve the negotiated TLS version from the ServerHello fields."""
+    sup = (supported or "").strip().split(",")[0].strip().lower()
+    leg = (legacy    or "").strip().split(",")[0].strip().lower()
+    if sup in _TLS_VER_LABEL: return _TLS_VER_LABEL[sup]
+    if leg in _TLS_VER_LABEL: return _TLS_VER_LABEL[leg]
+    return ""
+
+def ext_check_outbound_protocol_catalogue(ledger, target, om):
+    """Catalogue every unique outbound (destination, protocol, TLS version)
+    seen from the target.  Emitted as an Informational finding that serves as
+    the documented network baseline for the device."""
+
+    # 1. DNS reverse map (IP → FQDN) from observed A / AAAA answers
+    ip_to_name: dict[str, str] = {}
+    for r in ledger:
+        a_records   = (r.get("dns.a")    or "").strip()
+        aaaa_records = (r.get("dns.aaaa") or "").strip()
+        if not a_records and not aaaa_records: continue
+        name = (r.get("dns.qry.name") or "").strip().lower()
+        if not name: continue
+        for ip in (a_records.split(",") + aaaa_records.split(",")):
+            ip = ip.strip()
+            if ip and ip not in ip_to_name:
+                ip_to_name[ip] = name
+
+    # 2. Per-peer TLS version map from ServerHello frames headed back to target
+    tls_by_peer: dict[str, str] = {}
+    for r in ledger:
+        if r.get("ip.dst") != target: continue
+        if (r.get("tls.handshake.type") or "").strip().split(",")[0] != "2":
+            continue
+        peer = r.get("ip.src") or ""
+        if not peer: continue
+        label = _tls_label(r.get("tls.handshake.version"),
+                           r.get("tls.handshake.extensions.supported_version"))
+        if label and peer not in tls_by_peer:
+            tls_by_peer[peer] = label
+
+    # 3. Walk outbound packets and group into unique sets
+    entries: dict[tuple, dict] = {}
+    for r in ledger:
+        if r.get("ip.src") != target: continue
+        dst = r.get("ip.dst") or ""
+        if not dst: continue
+        try:
+            tdp = int((r.get("tcp.dstport") or "0").split(",")[0])
+            udp = int((r.get("udp.dstport") or "0").split(",")[0])
+        except (TypeError, ValueError):
+            tdp = udp = 0
+        proto_str = (r.get("frame.protocols") or "").lower()
+        sni = (r.get("tls.handshake.extensions_server_name") or "").strip()
+
+        # Protocol descriptor
+        if "mdns" in proto_str:                    pdesc = "mDNS over UDP/5353"
+        elif "llmnr" in proto_str:                 pdesc = "LLMNR over UDP/5355"
+        elif "nbns" in proto_str:                  pdesc = "NBT-NS over UDP/137"
+        elif "ssdp" in proto_str:                  pdesc = "SSDP over UDP/1900"
+        elif "dhcp" in proto_str or "bootp" in proto_str:
+                                                    pdesc = "DHCP over UDP/67-68"
+        elif "dns"  in proto_str and udp == 53:    pdesc = "DNS over UDP/53"
+        elif "dns"  in proto_str and tdp == 53:    pdesc = "DNS over TCP/53"
+        elif "igmp" in proto_str:                  pdesc = "IGMP"
+        elif "icmp" in proto_str:                  pdesc = "ICMP"
+        elif "arp"  in proto_str:                  pdesc = "ARP"
+        elif "quic" in proto_str:                  pdesc = f"QUIC over UDP/{udp or 443}"
+        elif tdp == 8883:                           pdesc = "MQTT over TLS, TCP/8883"
+        elif "tls"  in proto_str and tdp:          pdesc = f"TLS over TCP/{tdp}"
+        elif tdp:                                   pdesc = f"TCP/{tdp}"
+        elif udp:                                   pdesc = f"UDP/{udp}"
+        else:                                       pdesc = "raw"
+
+        # TLS version label.  For QUIC, RFC 9001 mandates TLS 1.3.
+        tls_label = ""
+        if "quic" in proto_str:
+            tls_label = "TLS 1.3"
+        elif "tls" in proto_str or tdp in (443, 5228, 8883):
+            tls_label = tls_by_peer.get(dst, "")
+
+        name = sni or ip_to_name.get(dst, "")
+        display = f"{name}  ({dst})" if name else dst
+        key = (display, pdesc, tls_label)
+        if key not in entries:
+            cat, org, purpose = classify_peer(dst, {sni} if sni else set())
+            entries[key] = {
+                "destination": display, "protocol": pdesc,
+                "tls_version": tls_label, "category": cat,
+                "org": org, "purpose": purpose,
+                "dest_ip": dst, "dest_name": name,
+            }
+
+    if not entries: return
+
+    sorted_entries = sorted(
+        entries.values(),
+        key=lambda e: (0 if is_private(e["dest_ip"]) else 1,
+                       e["destination"], e["protocol"]))
+
+    # Human-readable evidence
+    lines = [f"Outbound destinations and protocols observed from {target}",
+             "Format: destination | description | protocol | TLS version", ""]
+    for e in sorted_entries:
+        desc = e["purpose"] or e["org"] or e["category"] or "unclassified"
+        tls  = e["tls_version"] or "—"
+        lines.append(f"  {e['destination']}")
+        lines.append(f"      {desc}")
+        lines.append(f"      {e['protocol']}   [{tls}]")
+        lines.append("")
+    ev_path = om.evidence_path(target, "outbound_protocols.txt")
+    ev_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # Machine-readable evidence
+    js_path = om.evidence_path(target, "outbound_protocols.json")
+    js_path.write_text(json.dumps(sorted_entries, indent=2), encoding="utf-8")
+
+    om.add_finding(
+        catalogue_id="PT-010",
+        title="Outbound Protocols and Destinations Observed (Defensive Catalogue)",
+        ip=target, port=0, risk="INFO", service="network",
+        phase="external_protocol_catalogue",
+        description=(
+            f"CISO catalogued every unique destination and protocol combination "
+            f"observed originating from {target} across the supplied packet "
+            f"captures. {len(sorted_entries)} unique combinations identified, "
+            "annotated with the negotiated TLS version where applicable. The "
+            "catalogue serves as a documented network baseline against which "
+            "future captures can be compared — any unfamiliar destination "
+            "appearing in future traffic is the actionable event."),
+        impact=(
+            "Positive impact: the device's outbound surface is small, "
+            "well-defined and entirely encrypted at the transport layer for "
+            "external destinations. The catalogue documents the operational "
+            "baseline and is the authoritative scope for any perimeter egress "
+            "allow-listing the deployment environment chooses to enforce."),
+        remediation=(
+            "1) Treat this catalogue as the device's network-baseline allow-list "
+            "and re-validate it after every firmware release. 2) Where the "
+            "deployment environment supports egress allow-listing, configure the "
+            "perimeter to permit only the documented FQDNs over the documented "
+            "protocols and ports. 3) If a future release adds a new external "
+            "dependency, publish an updated baseline alongside the release notes."),
+        affected=f"All outbound traffic from {target}",
+        output="\n".join(lines[:60])[:4096],
+        output_file=str(ev_path.relative_to(om.root)),
+        owasp="A09:2021 Security Logging and Monitoring Failures",
+        nist="SC-7 Boundary Protection; AU-12 Audit Generation",
+    )
+
 EXTERNAL_CHECKS = [
     ext_check_hardcoded_dns,
     ext_check_cleartext_dns,
@@ -776,6 +943,7 @@ EXTERNAL_CHECKS = [
     ext_check_tls_cbc_ciphers,
     ext_check_dhcp_hostname,
     ext_check_dns_suffix_appending,
+    ext_check_outbound_protocol_catalogue,
 ]
 
 # ── Internal finding rules ───────────────────────────────────────────────────
