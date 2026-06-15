@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -221,6 +221,27 @@ LEDGER_FIELDS = [
     # cleartext protocols
     "ftp.request.command","telnet.data","http.host","http.request.uri",
     "http.authbasic","snmp.community","ldap.bindRequest_element",
+    # ── 2026-06-11 review additions ───────────────────────────────────
+    # Kerberos — needed for AS-REQ/AS-REP/TGS-REP capture (the artifacts
+    # downstream Vault uses for offline cracking and authentication
+    # surface analysis).
+    "kerberos.msg_type",
+    "kerberos.CNameString",
+    "kerberos.realm",
+    "kerberos.SNameString",
+    # NTLM — relay opportunity detection via NEGOTIATE_SIGN flag and
+    # SMB2 per-message signing flag.
+    "ntlmssp.messagetype",
+    "ntlmssp.negotiateflags",
+    "smb2.flags",
+    "smb2.flags.signing",
+    # JA3 / JA3S — TLS fingerprints. Wireshark 4.x emits these as part
+    # of the TLS dissector when "Calculate JA3" is enabled (default on).
+    "tls.handshake.ja3",
+    "tls.handshake.ja3s",
+    # IPP / MQTT / AMQP — printer-control, IoT MQTT, AMQP cleartext.
+    # These do not have field-set extractors equivalent to HTTP/SMB so
+    # we infer presence via frame.protocols and emit per-port findings.
 ]
 
 def extract_ledger(pcap: Path) -> list[dict]:
@@ -1296,6 +1317,243 @@ def int_check_ldap_cleartext(ledger, target, om):
         nist="SC-8 Transmission Confidentiality and Integrity",
     )
 
+# ── 2026-06-11 review: Kerberos artefact extraction ───────────────────────────
+# Records every Kerberos AS-REQ/AS-REP/TGS-REQ/TGS-REP observed in the pcap.
+# Each artefact is a credential-adjacent observation:
+#   AS-REQ with no preauth → AS-REP roastable user (offline crack against
+#     RC4 etype). Counts as MEDIUM in a passive trace.
+#   TGS-REP with RC4 → Kerberoastable SPN. MEDIUM in a passive trace.
+# Output goes to <run_dir>/kerberos/<target>_kerberos_artifacts.txt.
+
+_KRB_MSG = {"10":"AS-REQ", "11":"AS-REP", "12":"TGS-REQ", "13":"TGS-REP",
+            "14":"AP-REQ", "15":"AP-REP", "30":"ERROR"}
+
+def int_check_kerberos_artifacts(ledger, target, om):
+    msgs: list = []
+    for f in ledger:
+        mt = f.get("kerberos.msg_type", "")
+        if not mt: continue
+        cn = f.get("kerberos.CNameString", "")
+        sn = f.get("kerberos.SNameString", "")
+        rl = f.get("kerberos.realm", "")
+        src = f.get("ip.src", "") or f.get("ipv6.src", "")
+        dst = f.get("ip.dst", "") or f.get("ipv6.dst", "")
+        if target not in (src, dst): continue
+        msgs.append({"msg_type": _KRB_MSG.get(mt, mt), "raw_type": mt,
+                      "cname": cn, "sname": sn, "realm": rl,
+                      "src": src, "dst": dst})
+    if not msgs:
+        return
+    out_dir = om.evidence_root(target) / "kerberos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{target.replace(':','_')}_kerberos_artifacts.txt"
+    out_path.write_text(
+        "\n".join(f"{m['msg_type']:8s} cname={m['cname']:24s} "
+                  f"sname={m['sname']:32s} realm={m['realm']:24s} "
+                  f"src={m['src']:15s} dst={m['dst']}"
+                  for m in msgs), encoding="utf-8")
+    # Per-type summaries
+    asreq = sum(1 for m in msgs if m["raw_type"] == "10")
+    asrep = sum(1 for m in msgs if m["raw_type"] == "11")
+    tgsrep = sum(1 for m in msgs if m["raw_type"] == "13")
+    cn_set = sorted({m["cname"] for m in msgs if m["cname"]})
+    sn_set = sorted({m["sname"] for m in msgs if m["sname"]})
+    om.add_finding(
+        title=f"Kerberos Authentication Traffic Captured ({len(msgs)} messages)",
+        risk="MEDIUM" if (asrep > 0 or tgsrep > 0) else "INFO",
+        ip=target, hostname="", port=88,
+        catalogue_id="TRW-KRB-001",
+        description=(
+            f"Trawler observed Kerberos traffic to/from {target}: "
+            f"{asreq} AS-REQ, {asrep} AS-REP, {tgsrep} TGS-REP. "
+            f"Principals: {cn_set[:10]}{'…' if len(cn_set)>10 else ''}. "
+            f"Service names: {sn_set[:10]}{'…' if len(sn_set)>10 else ''}. "
+            f"AS-REP responses for users with 'Do not require Kerberos "
+            f"preauthentication' are offline-crackable (AS-REP roastable). "
+            f"TGS-REP responses with RC4 encryption are offline-crackable "
+            f"(Kerberoastable). Pivot via Vault for active enum."),
+        sources="trawler-kerberos",
+        affected=target, command="tshark -Y kerberos",
+        output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
+        remediation=(
+            "Disable RC4 in Kerberos policies (use AES256-CTS-HMAC-SHA1-96). "
+            "Audit user accounts for the 'Do not require Kerberos preauthentication' flag "
+            "and remove it where possible."),
+        owasp="A02:2021 Cryptographic Failures", nist="IA-2",
+    )
+
+
+# ── 2026-06-11 review: NTLM-relay opportunity detection ───────────────────────
+# Two paths:
+#   1. NTLMSSP NEGOTIATE message with NEGOTIATE_SIGN bit unset
+#      (bit 0x00000010 of negotiateflags).
+#   2. SMB2 traffic with the signing flag clear in NEGOTIATE/SESSION_SETUP.
+# Both indicate downstream relay-feasibility.
+
+def int_check_ntlm_relay_surface(ledger, target, om):
+    ntlm_no_sign = 0
+    smb_no_sign  = 0
+    samples = []
+    for f in ledger:
+        mt = f.get("ntlmssp.messagetype", "")
+        nf = f.get("ntlmssp.negotiateflags", "")
+        if mt and nf:
+            try:
+                flags = int(nf, 16) if nf.startswith("0x") else int(nf)
+                # NEGOTIATE_SIGN = 0x00000010, NEGOTIATE_SEAL = 0x00000020
+                if not (flags & 0x10):
+                    ntlm_no_sign += 1
+                    if len(samples) < 10: samples.append({"src": f.get("ip.src",""),
+                                                            "dst": f.get("ip.dst",""),
+                                                            "flags": nf})
+            except (ValueError, TypeError):
+                pass
+        # SMB2 signing flag check — smb2.flags has SIGNED bit 0x00000008
+        sf = f.get("smb2.flags", "")
+        if sf:
+            try:
+                v = int(sf, 16) if sf.startswith("0x") else int(sf)
+                if not (v & 0x8):
+                    smb_no_sign += 1
+            except (ValueError, TypeError):
+                pass
+    if ntlm_no_sign == 0 and smb_no_sign < 5:
+        return
+    out_dir = om.evidence_root(target) / "ntlm"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{target.replace(':','_')}_ntlm_relay_surface.txt"
+    out_path.write_text(
+        f"NTLM NEGOTIATE without SIGN flag: {ntlm_no_sign}\n"
+        f"SMB2 frames without signed flag : {smb_no_sign}\n\n"
+        f"Sample NTLM frames:\n" + "\n".join(str(s) for s in samples),
+        encoding="utf-8")
+    om.add_finding(
+        title=f"NTLM Relay Surface Observed (target {target})",
+        risk="HIGH",
+        ip=target, hostname="", port=445,
+        catalogue_id="TRW-NTLM-001",
+        description=(
+            f"Trawler observed NTLM/SMB2 traffic for {target} with the "
+            f"signing flag NOT set: {ntlm_no_sign} NTLMSSP NEGOTIATE messages "
+            f"without NEGOTIATE_SIGN; {smb_no_sign} SMB2 frames without the "
+            f"signed flag. Combined with LLMNR/NBT-NS poisoning + Responder, "
+            f"this enables NTLMv2 relay attacks (impacket-ntlmrelayx) for "
+            f"RBCD, shadow-credential, or AD-CS / ESC8 paths to domain "
+            f"compromise. Promote to Vault for active enumeration."),
+        sources="trawler-ntlm",
+        affected=target, command="tshark -Y ntlmssp || smb2",
+        output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
+        remediation=(
+            "Enforce SMB signing on all SMB clients and servers via Group "
+            "Policy ('Microsoft network server: Digitally sign communications "
+            "(always)'). Disable NTLMv1 entirely. Where possible, restrict "
+            "NTLM to specific accounts via 'Network security: Restrict NTLM'."),
+        owasp="A02:2021 Cryptographic Failures", nist="IA-2(8)",
+    )
+
+
+# ── 2026-06-11 review: JA3 / JA3S TLS fingerprint capture ─────────────────────
+# Records distinct JA3 fingerprints per target so downstream analysts can
+# correlate against well-known threat-actor JA3 catalogues (FoxIO, JA4-DB).
+
+def int_check_ja3_fingerprints(ledger, target, om):
+    ja3_seen:  dict[str, int] = {}
+    ja3s_seen: dict[str, int] = {}
+    for f in ledger:
+        src = f.get("ip.src", "") or f.get("ipv6.src", "")
+        dst = f.get("ip.dst", "") or f.get("ipv6.dst", "")
+        if target not in (src, dst): continue
+        j  = f.get("tls.handshake.ja3", "")
+        js = f.get("tls.handshake.ja3s", "")
+        if j:  ja3_seen[j]  = ja3_seen.get(j,  0) + 1
+        if js: ja3s_seen[js] = ja3s_seen.get(js, 0) + 1
+    if not ja3_seen and not ja3s_seen:
+        return
+    out_dir = om.evidence_root(target) / "tls"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{target.replace(':','_')}_ja3.txt"
+    lines = ["JA3 client fingerprints:"]
+    for h, n in sorted(ja3_seen.items(), key=lambda x: -x[1]):
+        lines.append(f"  {h}  ×{n}")
+    lines.append("JA3S server fingerprints:")
+    for h, n in sorted(ja3s_seen.items(), key=lambda x: -x[1]):
+        lines.append(f"  {h}  ×{n}")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    om.add_finding(
+        title=f"TLS JA3/JA3S Fingerprints Captured ({len(ja3_seen)} clients, {len(ja3s_seen)} servers)",
+        risk="INFO",
+        ip=target, hostname="", port=443,
+        catalogue_id="TRW-JA3-001",
+        description=(
+            f"Trawler captured {len(ja3_seen)} unique JA3 client and "
+            f"{len(ja3s_seen)} unique JA3S server TLS fingerprints for "
+            f"traffic to/from {target}. JA3 fingerprints can be matched "
+            f"against threat-actor catalogues (FoxIO ja3er.com, JA4-DB) "
+            f"to identify malicious tools / Cobalt Strike / specific "
+            f"malware families. Top JA3: "
+            f"{sorted(ja3_seen.items(), key=lambda x: -x[1])[:3]}."),
+        sources="trawler-ja3",
+        affected=target, command="tshark -e tls.handshake.ja3",
+        output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
+        remediation=(
+            "Cross-reference captured JA3 fingerprints against FoxIO ja3er.com "
+            "or local threat-intel JA3 lists to identify Cobalt Strike, "
+            "Metasploit, or other tooling signatures."),
+    )
+
+
+# ── 2026-06-11 review: IPP / MQTT / AMQP cleartext detection ───────────────────
+# Detects presence + emits MEDIUM when these protocols are observed in
+# cleartext. Uses frame.protocols string match since tshark has no
+# dedicated extractors for the relevant fields.
+
+def int_check_ipp_mqtt_amqp_cleartext(ledger, target, om):
+    proto_counts = {"ipp": 0, "mqtt": 0, "amqp": 0}
+    proto_remote = {"ipp": set(), "mqtt": set(), "amqp": set()}
+    for f in ledger:
+        protos = (f.get("frame.protocols") or "").lower()
+        src = f.get("ip.src", "") or f.get("ipv6.src", "")
+        dst = f.get("ip.dst", "") or f.get("ipv6.dst", "")
+        if target not in (src, dst): continue
+        for p in ("ipp", "mqtt", "amqp"):
+            if p in protos:
+                proto_counts[p] += 1
+                proto_remote[p].add(src if dst == target else dst)
+    out_dir = om.evidence_root(target) / "iot"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p, n in proto_counts.items():
+        if n == 0: continue
+        out_path = out_dir / f"{target.replace(':','_')}_{p}.txt"
+        out_path.write_text(
+            f"{p.upper()} frames involving {target}: {n}\n"
+            f"Remote peers: {sorted(proto_remote[p])[:30]}",
+            encoding="utf-8")
+        port = {"ipp": 631, "mqtt": 1883, "amqp": 5672}[p]
+        om.add_finding(
+            title=f"Cleartext {p.upper()} traffic observed (target {target})",
+            risk="MEDIUM",
+            ip=target, hostname="", port=port,
+            catalogue_id=f"TRW-{p.upper()}-001",
+            description=(
+                f"Trawler observed {n} {p.upper()} frames involving {target}. "
+                f"{p.upper()} is commonly used for "
+                + {"ipp": "printer control (often with usernames in URIs)",
+                    "mqtt": "IoT pub/sub (CONNECT packets carry user/pass in cleartext)",
+                    "amqp": "AMQP message brokering (cleartext credentials and message bodies)"}[p]
+                + f". Remote peers: {sorted(proto_remote[p])[:5]}."),
+            sources=f"trawler-{p}",
+            affected=target, command=f"tshark -Y {p}",
+            output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
+            remediation=(
+                f"Migrate {p.upper()} traffic to its TLS-wrapped variant ("
+                + {"ipp": "IPPS over TCP/443",
+                    "mqtt": "MQTT over TLS, port 8883",
+                    "amqp": "AMQPS, port 5671"}[p]
+                + ")."),
+            owasp="A02:2021 Cryptographic Failures", nist="SC-8",
+        )
+
+
 INTERNAL_CHECKS = [
     int_check_smbv1,
     int_check_llmnr_nbtns,
@@ -1308,6 +1566,11 @@ INTERNAL_CHECKS = [
     int_check_snmp_community,
     int_check_http_basic_auth,
     int_check_ldap_cleartext,
+    # 2026-06-11 review additions
+    int_check_kerberos_artifacts,
+    int_check_ntlm_relay_surface,
+    int_check_ja3_fingerprints,
+    int_check_ipp_mqtt_amqp_cleartext,
 ]
 
 # ── Driver ────────────────────────────────────────────────────────────────────
