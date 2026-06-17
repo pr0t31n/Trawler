@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -46,6 +46,17 @@ try:
 except Exception:
     _us = None
     _SHARED_OK = False
+
+# §13b/§14j/§14k: run-dir audit log (scan.log + scan.log.json + errors.log), set
+# in main() once the run dir is known. VC.log/error/status forward here so every
+# message + phase transition is persisted with a timestamp (tokens are ephemeral).
+try:
+    if "/opt/pr0t31n/shared" not in sys.path:
+        sys.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_event_log as _el
+except Exception:
+    _el = None
+_RUNLOG = None
 
 # ── Vantage protocol tokens ───────────────────────────────────────────────────
 _VANTAGE_MANAGED = os.environ.get("VANTAGE_MANAGED", "") == "1"
@@ -90,6 +101,14 @@ class VC:
 
     @classmethod
     def log(cls, message: str, level: str = "INFO") -> None:
+        if _RUNLOG is not None:
+            try:
+                lv = (level or "INFO").upper()
+                if lv == "ERROR":               _RUNLOG.error(message)
+                elif lv in ("WARN", "WARNING"): _RUNLOG.warn(message)
+                else:                           _RUNLOG.info(message)
+            except Exception:
+                pass
         if _VANTAGE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "level": level, "message": message}
@@ -101,6 +120,9 @@ class VC:
 
     @classmethod
     def error(cls, message: str, source: str = "trawler", detail: str = "") -> None:
+        if _RUNLOG is not None:
+            try: _RUNLOG.error(f"{message} {detail}".strip())
+            except Exception: pass
         if _VANTAGE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "source": source, "message": message,
@@ -113,6 +135,12 @@ class VC:
     @classmethod
     def status(cls, phase: str, label: str = "", status: str = "running",
                step: str = "", progress: int = 0, total: int = 0) -> None:
+        # §14j: persist the phase transition to the audit log with a timestamp.
+        if _RUNLOG is not None:
+            try:
+                _RUNLOG.event(f"phase {phase}: {status}" + (f" — {step}" if step else ""))
+            except Exception:
+                pass
         if _VANTAGE_MANAGED:
             with cls._lock:
                 entry = {"phase": phase, "label": label or phase, "status": status,
@@ -302,8 +330,9 @@ class OutputManager:
         self.evidence_dir    = self.root / "evidence"
         self.inventory_dir.mkdir(parents=True, exist_ok=True)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        # NB: scan.log.json / errors.log.json are owned by the §14j EventLogger
+        # (JSONL format), so they are NOT pre-seeded here as JSON arrays.
         for p, init in [(self.findings_json, "[]\n"),
-                        (self.json_log_file, "[]\n"),
                         (self.log_file, self._hdr("Trawler scan log")),
                         (self.error_log, self._hdr("Trawler error log"))]:
             if not p.exists():
@@ -1649,6 +1678,16 @@ def main() -> int:
 
     om = OutputManager(args.output_dir, scope=args.scope,
                        include_internal=args.include_internal)
+
+    # §13b/§14j/§14k: bring up the run-dir audit log + own-version startup EVENT.
+    global _RUNLOG
+    if _el is not None:
+        try:
+            _RUNLOG = _el.EventLogger(om.root / "scan.log",
+                                       errors_path=om.root / "errors.log")
+            _RUNLOG.event(f"Trawler v{VERSION} started")
+        except Exception:
+            _RUNLOG = None
 
     target_list = []
     if args.target:
