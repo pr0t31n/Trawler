@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.3.0"
+VERSION = "1.3.2"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -262,7 +262,7 @@ LEDGER_FIELDS = [
     "ntlmssp.messagetype",
     "ntlmssp.negotiateflags",
     "smb2.flags",
-    "smb2.flags.signing",
+    "smb2.flags.signature",
     # JA3 / JA3S — TLS fingerprints. Wireshark 4.x emits these as part
     # of the TLS dissector when "Calculate JA3" is enabled (default on).
     "tls.handshake.ja3",
@@ -456,10 +456,13 @@ class OutputManager:
         p = self.inventory_dir / f"{kind}.json"
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    def evidence_path(self, target: str, fname: str) -> Path:
+    def evidence_root(self, target: str) -> Path:
         d = self.evidence_dir / target.replace(":", "_")
         d.mkdir(parents=True, exist_ok=True)
-        return d / fname
+        return d
+
+    def evidence_path(self, target: str, fname: str) -> Path:
+        return self.evidence_root(target) / fname
 
 # ── Per-target peer rollup ───────────────────────────────────────────────────
 def rollup_target(ledger: list[dict], target_ip: str) -> dict:
@@ -1401,6 +1404,12 @@ def int_check_kerberos_artifacts(ledger, target, om):
             f"preauthentication' are offline-crackable (AS-REP roastable). "
             f"TGS-REP responses with RC4 encryption are offline-crackable "
             f"(Kerberoastable). Pivot via Vault for active enum."),
+        impact=(
+            f"An attacker who captured this Kerberos traffic can extract "
+            f"AS-REP and RC4 TGS-REP material for offline cracking. Any "
+            f"cracked credential yields authenticated domain access and "
+            f"lateral movement, and a privileged service ticket can escalate "
+            f"toward domain compromise."),
         sources="trawler-kerberos",
         affected=target, command="tshark -Y kerberos",
         output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
@@ -1469,6 +1478,12 @@ def int_check_ntlm_relay_surface(ledger, target, om):
             f"this enables NTLMv2 relay attacks (impacket-ntlmrelayx) for "
             f"RBCD, shadow-credential, or AD-CS / ESC8 paths to domain "
             f"compromise. Promote to Vault for active enumeration."),
+        impact=(
+            f"Because the observed NTLM/SMB2 traffic is unsigned, an on-path "
+            f"attacker can relay the victim's authentication to other services "
+            f"and act with the victim's privileges. Chained with LLMNR/NBT-NS "
+            f"poisoning and AD CS (ESC8) or resource-based constrained "
+            f"delegation, this can escalate to full domain compromise."),
         sources="trawler-ntlm",
         affected=target, command="tshark -Y ntlmssp || smb2",
         output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
@@ -1521,6 +1536,12 @@ def int_check_ja3_fingerprints(ledger, target, om):
             f"to identify malicious tools / Cobalt Strike / specific "
             f"malware families. Top JA3: "
             f"{sorted(ja3_seen.items(), key=lambda x: -x[1])[:3]}."),
+        impact=(
+            f"The fingerprints themselves are not an exposure, but they let "
+            f"an analyst identify the TLS client/server software in use. If a "
+            f"captured JA3 matches a known C2 or malware signature (e.g. Cobalt "
+            f"Strike, Metasploit), it indicates an active compromise on the "
+            f"host that warrants immediate investigation."),
         sources="trawler-ja3",
         affected=target, command="tshark -e tls.handshake.ja3",
         output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
@@ -1570,6 +1591,12 @@ def int_check_ipp_mqtt_amqp_cleartext(ledger, target, om):
                     "mqtt": "IoT pub/sub (CONNECT packets carry user/pass in cleartext)",
                     "amqp": "AMQP message brokering (cleartext credentials and message bodies)"}[p]
                 + f". Remote peers: {sorted(proto_remote[p])[:5]}."),
+            impact=(
+                f"Because the {p.upper()} traffic is unencrypted, any on-path "
+                f"observer can read the credentials and message contents it "
+                f"carries. Captured credentials enable unauthorized control of "
+                f"the printer, IoT device, or message broker and access to the "
+                f"sensitive data flowing through it."),
             sources=f"trawler-{p}",
             affected=target, command=f"tshark -Y {p}",
             output_file=str(out_path.relative_to(om.root)) if hasattr(om,"root") else str(out_path),
