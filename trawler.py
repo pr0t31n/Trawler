@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.3.2"
+VERSION = "1.4.0"
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
@@ -57,6 +57,16 @@ try:
 except Exception:
     _el = None
 _RUNLOG = None
+
+# ── Optional threat-intelligence module ──────────────────────────────────────
+try:
+    if "/opt/pr0t31n/shared" not in sys.path:
+        sys.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_threat_intel as _ti
+    _HAVE_THREAT_INTEL = True
+except ImportError:
+    _ti = None
+    _HAVE_THREAT_INTEL = False
 
 # ── Vantage protocol tokens ───────────────────────────────────────────────────
 _VANTAGE_MANAGED = os.environ.get("VANTAGE_MANAGED", "") == "1"
@@ -999,6 +1009,182 @@ EXTERNAL_CHECKS = [
     ext_check_outbound_protocol_catalogue,
 ]
 
+
+# ── Threat-intelligence peer checks ─────────────────────────────────────────
+# These run separately (need threat_db param) after the standard EXTERNAL_CHECKS.
+
+def ext_check_threat_intel_peers(ledger, target, om, threat_db):
+    """Check every unique external peer against threat-intel blocklists."""
+    if threat_db is None:
+        return
+    seen_peers: set[str] = set()
+    for r in ledger:
+        src = r.get("ip.src") or r.get("ipv6.src") or ""
+        dst = r.get("ip.dst") or r.get("ipv6.dst") or ""
+        if target not in (src, dst):
+            continue
+        peer = dst if src == target else src
+        if peer and not is_private(peer) and peer != target:
+            seen_peers.add(peer)
+
+    known_hits: list[dict] = []
+    suspected_hits: list[dict] = []
+
+    for peer_ip in sorted(seen_peers):
+        hit = threat_db.lookup_ip(peer_ip)
+        if not hit:
+            continue
+        geo = threat_db.geoip(peer_ip)
+        hit_record = hit.as_dict()
+        if geo:
+            hit_record["country_code"] = geo.country_code
+            hit_record["country_name"] = geo.country_name
+
+        # Write evidence file
+        ev_dir = om.evidence_root(target) / "threat_intel"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        ev_path = ev_dir / f"{peer_ip.replace(':','_')}_threat_hit.json"
+        ev_path.write_text(json.dumps(hit_record, indent=2), encoding="utf-8")
+
+        country_str = ""
+        if geo:
+            country_str = f" (Country: {geo.country_name} [{geo.country_code}])"
+
+        if hit.classification == "known_malicious":
+            known_hits.append(hit_record)
+            om.add_finding(
+                catalogue_id="PT-TI-001",
+                title=f"Outbound Connection to Known Malicious IP ({peer_ip})",
+                ip=target, port=0, risk="HIGH", service="network",
+                phase="threat_intelligence",
+                hostname="",
+                description=(
+                    f"Device {target} communicated with {peer_ip}{country_str}, "
+                    f"which is listed as KNOWN MALICIOUS on {len(hit.sources)} "
+                    f"threat-intelligence feed(s): {', '.join(hit.sources)}. "
+                    f"Tags: {', '.join(hit.tags)}."),
+                impact=(
+                    f"Communication with a confirmed malicious IP indicates "
+                    f"possible C2 callback, data exfiltration, or malware "
+                    f"download activity. The IP appears on curated blocklists "
+                    f"maintained by abuse.ch, Spamhaus, and/or Emerging Threats "
+                    f"— sources with very low false-positive rates. Immediate "
+                    f"investigation of {target} is warranted."),
+                remediation=(
+                    f"1. Block {peer_ip} at the perimeter firewall immediately.\n"
+                    f"2. Investigate {target} for compromise indicators — check "
+                    f"running processes, scheduled tasks, startup items.\n"
+                    f"3. Review the full traffic capture for data sent to this IP.\n"
+                    f"4. If confirmed compromised, isolate {target} and begin "
+                    f"incident response."),
+                affected=f"{target} → {peer_ip}",
+                output=json.dumps(hit_record, indent=2)[:4096],
+                output_file=str(ev_path.relative_to(om.root)),
+                owasp="A09:2021 Security Logging and Monitoring Failures",
+                nist="SI-4 System Monitoring; IR-4 Incident Handling",
+            )
+        else:
+            suspected_hits.append(hit_record)
+            om.add_finding(
+                catalogue_id="PT-TI-002",
+                title=f"Outbound Connection to Suspected Malicious IP ({peer_ip})",
+                ip=target, port=0, risk="MEDIUM", service="network",
+                phase="threat_intelligence",
+                hostname="",
+                description=(
+                    f"Device {target} communicated with {peer_ip}{country_str}, "
+                    f"which is listed as SUSPECTED on {len(hit.sources)} "
+                    f"threat-intelligence feed(s): {', '.join(hit.sources)}. "
+                    f"Tags: {', '.join(hit.tags)}. "
+                    f"Note: suspected listings come from honeypot, crowdsourced, "
+                    f"or scan-activity sources and have a moderate false-positive "
+                    f"rate — manual verification is recommended."),
+                impact=(
+                    f"The destination IP has been reported for suspicious "
+                    f"activity (scanning, brute-force, or poor reputation) by "
+                    f"community-driven sources. While not confirmed malicious, "
+                    f"the communication warrants investigation — especially if "
+                    f"{target} is not expected to reach arbitrary internet hosts."),
+                remediation=(
+                    f"1. Verify whether {peer_ip} is a legitimate service endpoint "
+                    f"for {target}'s expected operation.\n"
+                    f"2. If not expected, investigate {target} for compromise.\n"
+                    f"3. Consider blocking {peer_ip} at the perimeter if no "
+                    f"legitimate purpose is identified."),
+                affected=f"{target} → {peer_ip}",
+                output=json.dumps(hit_record, indent=2)[:4096],
+                output_file=str(ev_path.relative_to(om.root)),
+                owasp="A09:2021 Security Logging and Monitoring Failures",
+                nist="SI-4 System Monitoring",
+            )
+
+    if known_hits or suspected_hits:
+        VC.log(f"[threat-intel] {target}: {len(known_hits)} known malicious, "
+               f"{len(suspected_hits)} suspected out of {len(seen_peers)} "
+               f"external peers checked", "WARNING" if known_hits else "INFO")
+
+
+def write_threat_intel_report(om, all_traffic, threat_db):
+    """Write a consolidated threat_intel_report.json to the run dir."""
+    if threat_db is None:
+        return
+    report: dict[str, dict] = {}
+    total_ext_checked = 0
+
+    for target_ip, rec in all_traffic.items():
+        for peer in rec.get("external_peers", []):
+            peer_ip = peer.get("ip", "")
+            if not peer_ip:
+                continue
+            total_ext_checked += 1
+            hit = threat_db.lookup_ip(peer_ip)
+            if not hit:
+                continue
+            geo = threat_db.geoip(peer_ip)
+            if peer_ip not in report:
+                report[peer_ip] = {
+                    "ip": peer_ip,
+                    "classification": hit.classification,
+                    "sources": hit.sources,
+                    "tags": hit.tags,
+                    "confidence": hit.confidence,
+                    "risk": hit.risk,
+                    "country_code": geo.country_code if geo else "",
+                    "country_name": geo.country_name if geo else "",
+                    "communicating_targets": [],
+                }
+            if target_ip not in report[peer_ip]["communicating_targets"]:
+                report[peer_ip]["communicating_targets"].append(target_ip)
+
+    known_count = sum(1 for v in report.values()
+                      if v["classification"] == "known_malicious")
+    suspected_count = sum(1 for v in report.values()
+                          if v["classification"] == "suspected")
+
+    output = {
+        "generated": _iso(),
+        "tool": "trawler",
+        "version": VERSION,
+        "summary": {
+            "total_external_peers_checked": total_ext_checked,
+            "unique_external_peers": len({p.get("ip","") for r in all_traffic.values()
+                                          for p in r.get("external_peers",[])}),
+            "known_malicious_ips": known_count,
+            "suspected_malicious_ips": suspected_count,
+            "clean_ips": total_ext_checked - known_count - suspected_count,
+            "blocklist_stats": threat_db.stats(),
+        },
+        "malicious_peers": sorted(report.values(),
+                                   key=lambda x: (0 if x["classification"] == "known_malicious" else 1,
+                                                  x["ip"])),
+    }
+    path = om.root / "threat_intel_report.json"
+    path.write_text(json.dumps(output, indent=2, default=str), encoding="utf-8")
+    VC.log(f"[threat-intel] report written: {known_count} known malicious, "
+           f"{suspected_count} suspected across {total_ext_checked} peers",
+           "SUCCESS" if known_count == 0 else "WARNING")
+
+
 # ── Internal finding rules ───────────────────────────────────────────────────
 def int_check_smbv1(ledger, target, om):
     """smb.cmd field exists only for SMBv1 (smb2.cmd for SMB2/3)."""
@@ -1631,7 +1817,8 @@ INTERNAL_CHECKS = [
 
 # ── Driver ────────────────────────────────────────────────────────────────────
 def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
-                   include_internal: bool, scope: str) -> dict:
+                   include_internal: bool, scope: str,
+                   threat_db=None) -> dict:
     """Run all checks for one target and write per-target traffic rollup."""
     VC.status(f"target_{ip}", f"Target {ip}", "running", "starting", 0, 0)
     VC.target(ip=ip, scope=scope)
@@ -1640,6 +1827,12 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
     for fn in EXTERNAL_CHECKS:
         try:    fn(ledger, ip, om)
         except Exception as e: VC.error(f"external check {fn.__name__} failed: {e}")
+
+    # Threat-intelligence peer check (runs after standard external checks)
+    try:
+        ext_check_threat_intel_peers(ledger, ip, om, threat_db)
+    except Exception as e:
+        VC.error(f"threat-intel check failed: {e}")
 
     # Internal rules (opt-in)
     if include_internal:
@@ -1658,6 +1851,15 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
         p["snis"] = sorted(p["snis"]); p["tcp_ports"] = sorted(p["tcp_ports"])
         p["udp_ports"] = sorted(p["udp_ports"]); p["protocols"] = sorted(p["protocols"])
         is_internal = cat == "internal" or is_private(peer_ip)
+        # Enrich external peers with threat-intel and GeoIP data
+        if not is_internal and threat_db is not None:
+            hit = threat_db.lookup_ip(peer_ip)
+            if hit:
+                p["threat_hit"] = hit.as_dict()
+            geo = threat_db.geoip(peer_ip)
+            if geo:
+                p["country_code"] = geo.country_code
+                p["country_name"] = geo.country_name
         for port in p["tcp_ports"]:
             VC.port(ip=ip, port=port, proto="tcp", scope=scope)
         for port in p["udp_ports"]:
@@ -1716,6 +1918,27 @@ def main() -> int:
         except Exception:
             _RUNLOG = None
 
+    # Threat-intelligence DB init
+    _threat_db = None
+    if _HAVE_THREAT_INTEL:
+        try:
+            VC.status("threat_intel", "Threat Intelligence", "running",
+                      "loading blocklists")
+            _threat_db = _ti.ThreatIntelDB()
+            stats = _threat_db.stats()
+            VC.log(f"Threat-intel loaded: {stats['total_ips']} IPs "
+                   f"({stats['known_malicious']} known malicious, "
+                   f"{stats['suspected']} suspected), "
+                   f"{stats['cidr_ranges']} CIDR ranges")
+            if _RUNLOG:
+                _RUNLOG.event(f"Threat-intel DB loaded: {stats['total_ips']} IPs, "
+                              f"{stats['cidr_ranges']} CIDRs, "
+                              f"GeoIP={stats['geoip_available']}")
+            VC.status("threat_intel", "Threat Intelligence", "complete",
+                      f"{stats['total_ips']} IPs loaded")
+        except Exception as exc:
+            VC.error(f"Threat-intel init failed: {exc}")
+
     target_list = []
     if args.target:
         target_list = [args.target.strip()]
@@ -1747,7 +1970,8 @@ def main() -> int:
     traffic_rollup = {}
     targets_summary = []
     for ip in target_list:
-        rec = analyse_target(ip, combined_ledger, om, args.include_internal, args.scope)
+        rec = analyse_target(ip, combined_ledger, om, args.include_internal,
+                             args.scope, threat_db=_threat_db)
         traffic_rollup[ip] = rec
         targets_summary.append({
             "ip":            ip,
@@ -1764,6 +1988,12 @@ def main() -> int:
 
     om.write_traffic(traffic_rollup)
     om.write_targets(targets_summary)
+
+    # Consolidated threat-intelligence report
+    try:
+        write_threat_intel_report(om, traffic_rollup, _threat_db)
+    except Exception as exc:
+        VC.error(f"Threat-intel report failed: {exc}")
 
     # Inventory dumps
     om.write_inventory("external_peers",
