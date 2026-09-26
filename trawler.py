@@ -30,7 +30,7 @@ When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
 """
 from __future__ import annotations
-VERSION = "1.4.0"
+VERSION = Path(__file__).resolve().parent.joinpath("VERSION").read_text().strip()
 
 import argparse, csv, ipaddress, json, os, re, shutil, subprocess, sys
 import threading, uuid
