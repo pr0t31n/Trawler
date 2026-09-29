@@ -2150,6 +2150,156 @@ def _generate_cross_tool_action_items(om: OutputManager, findings: list,
             metadata={"source_category": "trawler_threat_intel"},
         )
 
+    # ── Cross-tool: Isotope (credential capture / analysis) ────────────
+    _ISOTOPE_TRIGGERS = {
+        "PT-102": "LLMNR/NBT-NS poisoning captured credentials",
+    }
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in _ISOTOPE_TRIGGERS:
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="credential_reuse",
+            recommended_tool="Isotope",
+            target=ip, ip=ip, port=0, hostname="",
+            title="Isotope: Crack captured NTLM hashes",
+            description=(
+                f"Trawler detected LLMNR/NBT-NS credential capture involving "
+                f"{ip}. Isotope can crack NTLMv1/v2 hashes via hashcat/John "
+                f"and test for credential reuse across services."),
+            priority="HIGH",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_credential_capture"},
+        )
+
+    # Kerberos traffic → Isotope Kerberoast
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in ("PT-112", "PT-113"):
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="credential_reuse",
+            recommended_tool="Isotope",
+            target=ip, ip=ip, port=88, hostname="",
+            title="Isotope: Kerberoast/AS-REP roast",
+            description=(
+                f"Trawler detected Kerberos traffic to {ip}. Isotope can "
+                f"perform Kerberoasting and AS-REP roasting to extract "
+                f"service account TGS tickets for offline cracking."),
+            priority="HIGH",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_kerberos"},
+        )
+
+    # NTLM traffic → Isotope relay + Bastion SMB signing
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in ("PT-101", "PT-102"):
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="config_audit",
+            recommended_tool="Bastion",
+            target=ip, ip=ip, port=445, hostname="",
+            title="Bastion: Audit SMB signing configuration",
+            description=(
+                f"Trawler detected SMB/NTLM traffic involving {ip}. "
+                f"Bastion can audit SMB signing enforcement to determine "
+                f"if NTLM relay attacks are feasible."),
+            priority="HIGH",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_smb_signing"},
+        )
+
+    # ── Cross-tool: Fracture/Siphon (web/API from HTTP traffic) ──────
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id != "PT-110":
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="web_app",
+            recommended_tool="Fracture",
+            target=ip, ip=ip, port=80, hostname="",
+            title="Fracture: Web application security test",
+            description=(
+                f"Trawler captured HTTP traffic involving {ip}. "
+                f"Fracture can perform comprehensive web application "
+                f"security testing including OWASP Top 10 checks."),
+            priority="MEDIUM",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_http_detection"},
+        )
+        om.add_action_item(
+            item_type="api",
+            recommended_tool="Siphon",
+            target=ip, ip=ip, port=80, hostname="",
+            title="Siphon: API security test",
+            description=(
+                f"Trawler captured HTTP traffic involving {ip}. "
+                f"Siphon can test for API-specific vulnerabilities "
+                f"including OWASP API Top 10."),
+            priority="MEDIUM",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_http_detection"},
+        )
+
+    # LDAP without TLS → Auger directory audit
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id != "PT-111":
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="directory_audit",
+            recommended_tool="Auger",
+            target=ip, ip=ip, port=389, hostname="",
+            title="Auger: LDAP directory audit",
+            description=(
+                f"Trawler detected unencrypted LDAP traffic to {ip}. "
+                f"Auger can perform comprehensive Active Directory and "
+                f"LDAP auditing for misconfigurations, privilege escalation "
+                f"paths, and access control weaknesses."),
+            priority="HIGH",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_ldap_detection"},
+        )
+
+    # IoT protocol traffic → Forge
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in ("PT-114", "PT-115", "PT-116"):
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        proto = f.get("title", "IoT protocol").split(":")[0] if ":" in f.get("title", "") else "IoT"
+        om.add_action_item(
+            item_type="iot_audit",
+            recommended_tool="Forge",
+            target=ip, ip=ip, port=f.get("port", 0), hostname="",
+            title=f"Forge: {proto} service exploitation",
+            description=(
+                f"Trawler detected {proto} traffic involving {ip}. "
+                f"Forge can test for default credentials, authentication "
+                f"bypass, and command injection on IoT/ICS protocols."),
+            priority="HIGH",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_iot_protocol"},
+        )
+
     # Traffic rollup: discovered peers with many ports → SS3
     for target_ip, rollup in traffic_rollup.items():
         for peer in rollup.get("external_peers", []):
