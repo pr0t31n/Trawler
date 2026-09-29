@@ -180,6 +180,17 @@ class VC:
                 sys.stdout.write(_VP_PORT + json.dumps(entry) + "\n")
                 sys.stdout.flush()
 
+    @classmethod
+    def action_item(cls, item: dict) -> None:
+        if _VANTAGE_MANAGED:
+            with cls._lock:
+                sys.stdout.write(_VP_LOG + json.dumps(
+                    {"ts": _iso(), "level": "ACTION_ITEM",
+                     "message": f"Action Item: {item.get('title', '')}"}) + "\n")
+                sys.stdout.flush()
+        else:
+            print(f"[+] Action Item: {item.get('title', '')}", flush=True)
+
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
@@ -473,6 +484,43 @@ class OutputManager:
 
     def evidence_path(self, target: str, fname: str) -> Path:
         return self.evidence_root(target) / fname
+
+    def add_action_item(self, *, item_type: str, recommended_tool: str,
+                        target: str, ip: str, port: int, hostname: str,
+                        title: str, description: str, priority: str = "MEDIUM",
+                        source_finding: str = "", scope: str = "",
+                        metadata: dict | None = None) -> None:
+        if not hasattr(self, "_ai_items"):
+            self._ai_items = []
+            self._ai_seen = set()
+        key = (recommended_tool.lower(), target.lower(), title.strip().lower())
+        if key in self._ai_seen:
+            return
+        self._ai_seen.add(key)
+        entry = {
+            "id": str(uuid.uuid4()),
+            "type": item_type,
+            "recommended_tool": recommended_tool,
+            "target": target,
+            "ip": ip, "port": port, "hostname": hostname,
+            "title": title, "description": description,
+            "source_finding": source_finding,
+            "priority": priority,
+            "scope": scope or self.scope,
+            "status": "pending",
+            "datetime": _iso(),
+            "metadata": metadata or {},
+        }
+        self._ai_items.append(entry)
+        VC.action_item(entry)
+
+    def write_action_items(self) -> None:
+        items = getattr(self, "_ai_items", [])
+        if not items:
+            return
+        ai_path = self.root / "action_items.json"
+        ai_path.write_text(json.dumps(items, indent=2, default=str), encoding="utf-8")
+        VC.log(f"[cross-tool] {len(items)} action item(s) written", "SUCCESS")
 
 # ── Per-target peer rollup ───────────────────────────────────────────────────
 def rollup_target(ledger: list[dict], target_ip: str) -> dict:
@@ -2017,11 +2065,115 @@ def main() -> int:
         "include_internal":  args.include_internal,
     })
 
+    # Phase 4: cross-tool action items
+    _generate_cross_tool_action_items(om, findings, traffic_rollup)
+
     VC.log(f"Scan complete. Findings: {len(findings)} "
            f"({dict(risk_counts)})", "SUCCESS")
     VC.status("trawler_complete", "Trawler", "complete",
               f"{len(findings)} findings")
     return 0
+
+
+def _generate_cross_tool_action_items(om: OutputManager, findings: list,
+                                       traffic_rollup: dict) -> None:
+    """Emit Scattershot3 action items based on Trawler traffic analysis."""
+    _SS3_TRIGGER_CATALOGUES = {
+        "PT-101": ("SMBv1 traffic — scan for EternalBlue and SMB vulnerabilities",
+                   "CRITICAL"),
+        "PT-102": ("LLMNR/NBT-NS — scan for Responder relay surface",
+                   "HIGH"),
+        "PT-103": ("SSDP broadcasts — scan for exposed UPnP services",
+                   "MEDIUM"),
+        "PT-104": ("mDNS activity — scan for service discovery surface",
+                   "LOW"),
+        "PT-107": ("Cleartext FTP — scan for anonymous access and brute force",
+                   "HIGH"),
+        "PT-108": ("Cleartext Telnet — scan for default credentials",
+                   "HIGH"),
+        "PT-109": ("SNMPv1/v2c — scan for community string brute force",
+                   "HIGH"),
+        "PT-110": ("HTTP Basic Auth cleartext — scan for credential brute force",
+                   "HIGH"),
+        "PT-111": ("LDAP without TLS — scan for bind credential exposure",
+                   "HIGH"),
+    }
+
+    # Collect IPs involved in cleartext/vulnerable protocol findings
+    _ips_by_finding: dict = {}
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in _SS3_TRIGGER_CATALOGUES:
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        _ips_by_finding.setdefault(cat_id, set()).add(ip)
+
+    for cat_id, ips in _ips_by_finding.items():
+        desc_suffix, priority = _SS3_TRIGGER_CATALOGUES[cat_id]
+        for ip in list(ips)[:10]:
+            om.add_action_item(
+                item_type="network_scan",
+                recommended_tool="Scattershot3",
+                target=ip, ip=ip, port=0, hostname="",
+                title=f"Network scan: {desc_suffix.split(' — ')[0]}",
+                description=(
+                    f"Trawler captured {desc_suffix.split(' — ')[0].lower()} "
+                    f"involving {ip}. Scattershot3 can perform targeted scanning "
+                    f"to {desc_suffix.split(' — ')[1]}."),
+                priority=priority,
+                source_finding=cat_id,
+                metadata={"source_category": "trawler_protocol_detection",
+                           "catalogue_id": cat_id},
+            )
+
+    # Malicious IP findings → SS3 deep scan
+    for f in findings:
+        cat_id = f.get("catalogue_id", "")
+        if cat_id not in ("PT-TI-001", "PT-TI-002"):
+            continue
+        ip = f.get("ip", "")
+        if not ip:
+            continue
+        om.add_action_item(
+            item_type="network_scan",
+            recommended_tool="Scattershot3",
+            target=ip, ip=ip, port=0, hostname="",
+            title="Deep scan: threat-intel flagged IP",
+            description=(
+                f"Trawler identified outbound traffic to {ip}, which is flagged "
+                f"by threat intelligence. Scattershot3 can perform comprehensive "
+                f"port scanning and vulnerability assessment."),
+            priority="CRITICAL",
+            source_finding=cat_id,
+            metadata={"source_category": "trawler_threat_intel"},
+        )
+
+    # Traffic rollup: discovered peers with many ports → SS3
+    for target_ip, rollup in traffic_rollup.items():
+        for peer in rollup.get("external_peers", []):
+            tcp_ports = peer.get("tcp_ports", set())
+            if isinstance(tcp_ports, set):
+                tcp_ports = list(tcp_ports)
+            if len(tcp_ports) >= 5:
+                om.add_action_item(
+                    item_type="network_scan",
+                    recommended_tool="Scattershot3",
+                    target=peer["ip"], ip=peer["ip"], port=0, hostname="",
+                    title="Network scan: multi-port external peer",
+                    description=(
+                        f"Trawler observed {len(tcp_ports)} TCP ports in traffic "
+                        f"to {peer['ip']} from {target_ip}. "
+                        f"Scattershot3 can enumerate services on all ports."),
+                    priority="MEDIUM",
+                    source_finding="traffic_analysis",
+                    metadata={"source_category": "trawler_multi_port",
+                               "observed_ports": tcp_ports[:20]},
+                )
+
+    om.write_action_items()
+
 
 if __name__ == "__main__":
     sys.exit(main())
