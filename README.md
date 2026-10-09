@@ -1,16 +1,21 @@
 # Trawler
 
 Passive pcap-based traffic analyser for the pr0t31n toolkit. Surfaces
-DNS / TLS / DHCP / cleartext-protocol risks per target IP, in two modes:
+DNS / TLS / DHCP / cleartext-protocol risks from packet captures, in
+three modes:
 
-- **External-only** (default): catalogues what the target IP exposes to
-  public peers and emits findings about hardcoded resolvers, cleartext
-  DNS, TLS posture, mTLS client-cert leaks, DHCP info disclosure, etc.
-- **External + Internal** (`--include-internal`): additionally applies
-  internal-network rules against private-IP peer interactions — SMBv1,
-  LLMNR / NBT-NS, SSDP, mDNS exposure, LLDP topology, ARP anomalies,
-  cleartext FTP / Telnet, SNMPv1/v2c communities, HTTP Basic Auth,
-  LDAP bind without TLS.
+- **Targeted / External-only** (default with `--target`): catalogues what
+  a specific target IP exposes to public peers — hardcoded resolvers,
+  cleartext DNS, TLS posture, mTLS client-cert leaks, DHCP disclosure.
+- **Targeted / External + Internal** (`--target` + `--include-internal`):
+  additionally applies internal-network rules — SMBv1, LLMNR / NBT-NS,
+  SSDP, mDNS, LLDP topology, ARP anomalies, cleartext FTP / Telnet,
+  SNMPv1/v2c communities, HTTP Basic Auth, LDAP bind without TLS.
+- **Hunt mode** (`--hunt`, or omit `--target`): threat-hunting mode —
+  auto-discovers every unique IP in the capture and runs ALL rules
+  (external + internal) against each. Designed for network threat hunting
+  where you want to scan all traffic for malicious, suspicious, or
+  plaintext activity without knowing which IPs to focus on.
 
 Findings emit in the universal Scattershot3/Vantage schema and slot
 straight into Vantage's Findings + Traffic tabs, Crucible's evidence
@@ -79,6 +84,18 @@ python3 trawler.py \
     --scope int \
     --output-dir /clients/foo/2026/trawler/foo_20260529_120200/ \
     --client foo
+
+# Hunt mode — threat hunting across all traffic (no target required)
+python3 trawler.py \
+    --pcap /captures/network_tap.pcap \
+    --hunt \
+    --output-dir /clients/foo/2026/trawler/foo_20260529_120300/ \
+    --client foo
+
+# Hunt mode implied — just omit --target
+python3 trawler.py \
+    --pcap /captures/network_tap.pcap \
+    --output-dir /clients/foo/2026/trawler/foo_20260529_120400/
 ```
 
 ## Output layout

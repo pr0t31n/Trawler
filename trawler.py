@@ -2,29 +2,34 @@
 """
 trawler.py — pr0t31n toolkit pcap-based traffic analyser.
 
-Performs per-target passive analysis of one or more packet captures and
-emits security findings in the universal Scattershot3/Vantage schema.
+Performs passive analysis of one or more packet captures and emits security
+findings in the universal Scattershot3/Vantage schema.
 
 Modes:
-  external-only  (default)       Flag DNS / TLS / DHCP / cloud-architecture
-                                 risks the target IP exposes to public peers.
-  external + internal            With --include-internal: additionally apply
-                                 internal-network rules (SMBv1, LLMNR/NBT-NS,
-                                 SSDP, mDNS exposure, LLDP, ARP anomalies,
-                                 cleartext FTP/Telnet/SNMP, HTTP basic auth,
-                                 LDAP cleartext) against private-IP peers.
+  targeted (default when --target or --targets-file provided)
+    Per-target analysis — external rules always run, --include-internal
+    additionally applies SMBv1, LLMNR/NBT-NS, SSDP, mDNS, LLDP, ARP,
+    cleartext FTP/Telnet/SNMP, HTTP Basic, LDAP.
+
+  hunt (--hunt, or when no target is specified)
+    Threat-hunting mode — auto-discovers every unique IP in the pcap and
+    runs ALL rules (external + internal) against each. Looks for malicious,
+    suspicious, and plaintext activity across the entire capture without
+    requiring a specific target IP.
 
 Multi-format capture support:
   .pcap .pcapng .cap .ntar .erf .snoop .pcap.gz .pcapng.gz — anything
   Wireshark's editcap can read is auto-normalised to .pcapng before analysis.
 
 Usage:
-  trawler.py --pcap CAP [--pcap CAP …]
-             (--target IP | --targets-file PATH)
-             [--include-internal]
-             [--scope int|ext]
-             --output-dir DIR
-             --client SHORT
+  # Targeted mode (focused on specific IP)
+  trawler.py --pcap CAP --target IP --output-dir DIR
+
+  # Hunt mode (all traffic, no target required)
+  trawler.py --pcap CAP --hunt --output-dir DIR
+
+  # Hunt mode implied (no target given)
+  trawler.py --pcap CAP --output-dir DIR
 
 When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
 __VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
@@ -1930,20 +1935,47 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
         "ports_with_data": len(roll["ports_with_data"]),
     }
 
+def _discover_ips(ledger: list[dict]) -> list[str]:
+    """Extract all unique IPs from the ledger for hunt mode."""
+    ips: set[str] = set()
+    for r in ledger:
+        for field in ("ip.src", "ip.dst", "ipv6.src", "ipv6.dst"):
+            ip = r.get(field, "")
+            if ip and ip not in ("0.0.0.0", "255.255.255.255", "::", "ff02::1",
+                                  "ff02::fb", "ff02::1:3", "224.0.0.251",
+                                  "224.0.0.252", "239.255.255.250"):
+                try:
+                    ipaddress.ip_address(ip)
+                    ips.add(ip)
+                except ValueError:
+                    pass
+    return sorted(ips, key=ip_key)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="trawler — pcap traffic analyser")
+    ap = argparse.ArgumentParser(
+        description="trawler — pcap traffic analyser",
+        epilog="When no --target or --targets-file is given, hunt mode is implied.")
     ap.add_argument("--pcap", action="append", required=True,
                     help="Capture file (multi-format). Repeat for multiple files.")
-    g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--target", help="Single target IP")
-    g.add_argument("--targets-file", help="File with one IP per line")
+    g = ap.add_mutually_exclusive_group(required=False)
+    g.add_argument("--target", help="Single target IP (targeted mode)")
+    g.add_argument("--targets-file", help="File with one IP per line (targeted mode)")
+    ap.add_argument("--hunt", action="store_true",
+                    help="Threat-hunting mode — analyse all traffic for malicious, "
+                         "suspicious and plaintext activity without a specific target. "
+                         "Implied when no --target or --targets-file is given.")
     ap.add_argument("--include-internal", action="store_true",
-                    help="Also apply internal-network rules")
+                    help="Also apply internal-network rules (always on in hunt mode)")
     ap.add_argument("--scope", default="int", choices=("int","ext"),
                     help="Scope label (passed through from Scattershot3 or set manually)")
     ap.add_argument("--output-dir", required=True, help="Universal run-dir root")
     ap.add_argument("--client", default="trawler", help="Client short name")
     args = ap.parse_args()
+
+    hunt_mode = args.hunt or (not args.target and not args.targets_file)
+    if hunt_mode:
+        args.include_internal = True
 
     if not TSHARK:
         VC.error(
@@ -1991,13 +2023,15 @@ def main() -> int:
     target_list = []
     if args.target:
         target_list = [args.target.strip()]
-    else:
+    elif args.targets_file:
         target_list = [l.strip() for l in Path(args.targets_file).read_text().splitlines()
                        if l.strip()]
-    om._write_meta(args.client, ", ".join(target_list), args.include_internal)
 
-    VC.log(f"trawler v{VERSION} — scope={args.scope} include_internal={args.include_internal}")
-    VC.log(f"targets: {len(target_list)}  pcaps: {len(args.pcap)}")
+    mode_label = "hunt" if hunt_mode else "targeted"
+    VC.log(f"trawler v{VERSION} — mode={mode_label} scope={args.scope} "
+           f"include_internal={args.include_internal}")
+    VC.log(f"pcaps: {len(args.pcap)}" +
+           (f"  targets: {len(target_list)}" if target_list else "  targets: auto-discover (hunt)"))
 
     # Phase 1: normalise + extract
     VC.status("load_captures", "Load Captures", "running", "", 0, len(args.pcap))
@@ -2014,6 +2048,23 @@ def main() -> int:
                   f"{path.name}", i, len(args.pcap))
     VC.status("load_captures", "Load Captures", "complete",
               f"{len(combined_ledger):,} total frames")
+
+    # Hunt mode: auto-discover IPs from the ledger when no targets given
+    if hunt_mode and not target_list:
+        VC.status("discover_hosts", "Discover Hosts", "running",
+                  "extracting unique IPs from capture")
+        target_list = _discover_ips(combined_ledger)
+        VC.log(f"[hunt] discovered {len(target_list)} unique IPs from capture")
+        VC.status("discover_hosts", "Discover Hosts", "complete",
+                  f"{len(target_list)} hosts")
+        if not target_list:
+            VC.error("No IP addresses found in capture — nothing to analyse")
+            return 1
+
+    om._write_meta(args.client,
+                   "hunt:all" if (hunt_mode and len(target_list) > 20)
+                   else ", ".join(target_list[:20]),
+                   args.include_internal)
 
     # Phase 2: per-target analysis
     traffic_rollup = {}
@@ -2058,6 +2109,7 @@ def main() -> int:
         findings = []
     risk_counts = Counter((f.get("risk") or "INFO").upper() for f in findings)
     om.write_summary({
+        "mode":              mode_label,
         "targets_analysed":  len(target_list),
         "pcaps_analysed":    len(args.pcap),
         "frames_analysed":   len(combined_ledger),
