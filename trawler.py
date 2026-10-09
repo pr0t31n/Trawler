@@ -1935,15 +1935,17 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
         "ports_with_data": len(roll["ports_with_data"]),
     }
 
-def _discover_ips(ledger: list[dict]) -> list[str]:
+def _discover_ips(ledger: list[dict], exclude: "set[str] | None" = None) -> list[str]:
     """Extract all unique IPs from the ledger for hunt mode."""
     ips: set[str] = set()
+    skip = exclude or set()
     for r in ledger:
         for field in ("ip.src", "ip.dst", "ipv6.src", "ipv6.dst"):
             ip = r.get(field, "")
-            if ip and ip not in ("0.0.0.0", "255.255.255.255", "::", "ff02::1",
-                                  "ff02::fb", "ff02::1:3", "224.0.0.251",
-                                  "224.0.0.252", "239.255.255.250"):
+            if ip and ip not in skip and ip not in (
+                    "0.0.0.0", "255.255.255.255", "::", "ff02::1",
+                    "ff02::fb", "ff02::1:3", "224.0.0.251",
+                    "224.0.0.252", "239.255.255.250"):
                 try:
                     ipaddress.ip_address(ip)
                     ips.add(ip)
@@ -1965,6 +1967,12 @@ def main() -> int:
                     help="Threat-hunting mode — analyse all traffic for malicious, "
                          "suspicious and plaintext activity without a specific target. "
                          "Implied when no --target or --targets-file is given.")
+    ap.add_argument("--ignore", action="append", default=[],
+                    help="IP to exclude from analysis (e.g. the testing server). "
+                         "All traffic to/from this IP is dropped from the ledger "
+                         "before any rules run. Repeat for multiple IPs.")
+    ap.add_argument("--ignore-file",
+                    help="File with one IP per line to exclude from analysis")
     ap.add_argument("--include-internal", action="store_true",
                     help="Also apply internal-network rules (always on in hunt mode)")
     ap.add_argument("--scope", default="int", choices=("int","ext"),
@@ -1976,6 +1984,15 @@ def main() -> int:
     hunt_mode = args.hunt or (not args.target and not args.targets_file)
     if hunt_mode:
         args.include_internal = True
+
+    # Build ignore set
+    ignore_ips: set[str] = set(ip.strip() for ip in args.ignore if ip.strip())
+    if args.ignore_file:
+        try:
+            ignore_ips.update(l.strip() for l in Path(args.ignore_file).read_text().splitlines()
+                              if l.strip() and not l.strip().startswith("#"))
+        except Exception as e:
+            VC.error(f"Cannot read ignore file: {e}")
 
     if not TSHARK:
         VC.error(
@@ -2026,10 +2043,14 @@ def main() -> int:
     elif args.targets_file:
         target_list = [l.strip() for l in Path(args.targets_file).read_text().splitlines()
                        if l.strip()]
+    if ignore_ips and target_list:
+        target_list = [ip for ip in target_list if ip not in ignore_ips]
 
     mode_label = "hunt" if hunt_mode else "targeted"
     VC.log(f"trawler v{VERSION} — mode={mode_label} scope={args.scope} "
            f"include_internal={args.include_internal}")
+    if ignore_ips:
+        VC.log(f"ignoring: {', '.join(sorted(ignore_ips))}")
     VC.log(f"pcaps: {len(args.pcap)}" +
            (f"  targets: {len(target_list)}" if target_list else "  targets: auto-discover (hunt)"))
 
@@ -2049,11 +2070,23 @@ def main() -> int:
     VC.status("load_captures", "Load Captures", "complete",
               f"{len(combined_ledger):,} total frames")
 
+    # Filter ignored IPs from the ledger
+    if ignore_ips:
+        pre_count = len(combined_ledger)
+        combined_ledger = [r for r in combined_ledger
+                           if (r.get("ip.src") or "") not in ignore_ips
+                           and (r.get("ip.dst") or "") not in ignore_ips
+                           and (r.get("ipv6.src") or "") not in ignore_ips
+                           and (r.get("ipv6.dst") or "") not in ignore_ips]
+        dropped = pre_count - len(combined_ledger)
+        VC.log(f"[ignore] filtered {dropped:,} frames involving "
+               f"{', '.join(sorted(ignore_ips))} — {len(combined_ledger):,} remain")
+
     # Hunt mode: auto-discover IPs from the ledger when no targets given
     if hunt_mode and not target_list:
         VC.status("discover_hosts", "Discover Hosts", "running",
                   "extracting unique IPs from capture")
-        target_list = _discover_ips(combined_ledger)
+        target_list = _discover_ips(combined_ledger, exclude=ignore_ips)
         VC.log(f"[hunt] discovered {len(target_list)} unique IPs from capture")
         VC.status("discover_hosts", "Discover Hosts", "complete",
                   f"{len(target_list)} hosts")

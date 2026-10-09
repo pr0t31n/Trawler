@@ -16,6 +16,12 @@ three modes:
   (external + internal) against each. Designed for network threat hunting
   where you want to scan all traffic for malicious, suspicious, or
   plaintext activity without knowing which IPs to focus on.
+- **Ignore filter** (`--ignore <IP>` / `--ignore-file <path>`): excludes
+  all traffic to/from specified IPs from the ledger before any rules run.
+  Essential for passive recon where the testing server's scan traffic
+  (nmap probes, etc.) would generate false findings. Ignored IPs are also
+  excluded from auto-discovered targets in hunt mode and from explicit
+  target lists. Multiple `--ignore` flags can be combined.
 
 Findings emit in the universal Scattershot3/Vantage schema and slot
 straight into Vantage's Findings + Traffic tabs, Crucible's evidence
@@ -96,6 +102,30 @@ python3 trawler.py \
 python3 trawler.py \
     --pcap /captures/network_tap.pcap \
     --output-dir /clients/foo/2026/trawler/foo_20260529_120400/
+
+# Passive recon — hunt mode with testing server excluded
+python3 trawler.py \
+    --pcap /captures/passive_recon.pcap \
+    --hunt \
+    --ignore 192.168.1.100 \
+    --output-dir /clients/foo/2026/trawler/foo_20260529_120500/ \
+    --client foo
+
+# Multiple IPs to ignore (one --ignore per IP, or use --ignore-file)
+python3 trawler.py \
+    --pcap /captures/passive_recon.pcap \
+    --hunt \
+    --ignore 192.168.1.100 --ignore 192.168.1.101 \
+    --output-dir /clients/foo/2026/trawler/foo_20260529_120600/ \
+    --client foo
+
+# Ignore list from file (one IP per line)
+python3 trawler.py \
+    --pcap /captures/passive_recon.pcap \
+    --hunt \
+    --ignore-file /tmp/testing_servers.txt \
+    --output-dir /clients/foo/2026/trawler/foo_20260529_120700/ \
+    --client foo
 ```
 
 ## Output layout
