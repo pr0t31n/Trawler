@@ -17,6 +17,23 @@ def _run(cmd, check=True):
 
 def _has(binary): return shutil.which(binary) is not None
 
+
+def _pip_installed(pkg_spec):
+    """Check whether a pip package is already importable."""
+    import importlib.util
+    name = pkg_spec.split(">=")[0].split("==")[0].split("[")[0].split("<")[0].strip()
+    _IMPORT_MAP = {
+        "python-whois": "whois", "beautifulsoup4": "bs4", "python-docx": "docx",
+        "pyOpenSSL": "OpenSSL", "dnspython": "dns", "pyyaml": "yaml",
+        "Pillow": "PIL", "charset-normalizer": "charset_normalizer",
+    }
+    mod = _IMPORT_MAP.get(name, name.replace("-", "_"))
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
 def install_system_deps():
     """tshark / editcap / capinfos / dumpcap via OS package manager."""
     needed = {
@@ -54,13 +71,24 @@ def install_system_deps():
         sys.exit(1)
 
 def install_python_deps():
-    """v1 is stdlib-only; keep this hook for future use."""
+    """Install Python deps from requirements.txt, checking each first."""
     req = Path(__file__).parent / "requirements.txt"
-    if req.exists() and req.read_text().strip():
-        _run([sys.executable, "-m", "pip", "install",
-              "--break-system-packages", "-r", str(req)])
-    else:
+    if not req.exists() or not req.read_text().strip():
         print("  [ok] no Python deps required (stdlib-only)")
+        return
+    pip = [sys.executable, "-m", "pip"]
+    for line in req.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        if _pip_installed(line):
+            print(f"  [ok]   ✓ {line} already installed")
+            continue
+        print(f"  [*] pip install {line} …")
+        try:
+            _run(pip + ["install", "--break-system-packages", line])
+        except subprocess.CalledProcessError:
+            print(f"  [!] pip install failed for {line}")
 
 def create_dirs():
     """Trawler keeps no global state; clients/run-dirs are created per scan
