@@ -132,7 +132,7 @@ class VC:
                 sys.stdout.flush()
         else:
             tag = {"INFO":"[*]","SUCCESS":"[+]","WARNING":"[~]","ERROR":"[!]"}.get(level,"[*]")
-            print(f"{tag} {message}", flush=True)
+            print(f"[{_hms()}] {tag} {message}", flush=True)
 
     @classmethod
     def error(cls, message: str, source: str = "trawler", detail: str = "") -> None:
@@ -146,7 +146,7 @@ class VC:
                 sys.stderr.write(_VP_ERR + json.dumps(entry) + "\n")
                 sys.stderr.flush()
         else:
-            print(f"[!] {message}  {detail}", file=sys.stderr, flush=True)
+            print(f"[{_hms()}] [!] {message}  {detail}", file=sys.stderr, flush=True)
 
     @classmethod
     def status(cls, phase: str, label: str = "", status: str = "running",
@@ -164,6 +164,12 @@ class VC:
                          "ts": _iso()}
                 sys.stdout.write(_VP_STATUS + json.dumps(entry) + "\n")
                 sys.stdout.flush()
+        else:
+            prog = f" [{progress}/{total}]" if total else ""
+            step_str = f" — {step}" if step else ""
+            icon = {"running": "[~]", "complete": "[+]", "error": "[!]"}.get(status, "[*]")
+            print(f"[{_hms()}] {icon} {label or phase}: {status}{step_str}{prog}",
+                  flush=True)
 
     @classmethod
     def target(cls, ip: str, hostname: str | None = None,
@@ -195,10 +201,14 @@ class VC:
                      "message": f"Action Item: {item.get('title', '')}"}) + "\n")
                 sys.stdout.flush()
         else:
-            print(f"[+] Action Item: {item.get('title', '')}", flush=True)
+            print(f"[{_hms()}] [+] Action Item: {item.get('title', '')}", flush=True)
 
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+def _hms() -> str:
+    """Local-time bracket timestamp for terminal output."""
+    return datetime.now().strftime("%H:%M:%S")
 
 def _ts_fname() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -220,8 +230,11 @@ def normalise_capture(in_path: Path, out_dir: Path) -> Path:
     """Convert any tshark/editcap-readable capture to .pcapng. Returns new path
     (or the original if already pcapng)."""
     suffix = in_path.suffix.lower()
+    size_mb = in_path.stat().st_size / (1024 * 1024) if in_path.exists() else 0
     if suffix == ".pcapng":
+        VC.log(f"[normalise] {in_path.name} already pcapng ({size_mb:.1f} MB) — skipping conversion")
         return in_path
+    VC.log(f"[normalise] Converting {in_path.name} ({suffix}, {size_mb:.1f} MB) to pcapng...")
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / (in_path.stem + ".pcapng")
     if not EDITCAP:
@@ -231,6 +244,8 @@ def normalise_capture(in_path: Path, out_dir: Path) -> Path:
     try:
         subprocess.run([EDITCAP, "-F", "pcapng", str(in_path), str(out)],
                        check=True, capture_output=True, timeout=300)
+        out_mb = out.stat().st_size / (1024 * 1024)
+        VC.log(f"[normalise] Conversion complete — {out.name} ({out_mb:.1f} MB)")
         return out
     except subprocess.CalledProcessError as e:
         VC.error(f"editcap failed: {e.stderr.decode(errors='replace')[:200]}")
@@ -309,21 +324,25 @@ def extract_ledger(pcap: Path) -> list[dict]:
            "-E", "occurrence=a", "-E", "aggregator=;"]
     for f in LEDGER_FIELDS:
         cmd += ["-e", f]
-    VC.log(f"[ledger] extracting {pcap.name} via tshark ({len(LEDGER_FIELDS)} fields)")
+    pcap_mb = pcap.stat().st_size / (1024 * 1024) if pcap.exists() else 0
+    VC.log(f"[ledger] Extracting {pcap.name} ({pcap_mb:.1f} MB) via tshark — {len(LEDGER_FIELDS)} fields per frame...")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:
-        VC.error(f"tshark timeout on {pcap.name}"); return []
+        VC.error(f"tshark timeout on {pcap.name} after 1800s"); return []
     if proc.returncode != 0:
-        VC.error(f"tshark exited {proc.returncode}",
+        VC.error(f"tshark exited {proc.returncode} on {pcap.name}",
                  detail=proc.stderr[:300]); return []
+    stderr_lines = (proc.stderr or "").strip()
+    if stderr_lines:
+        VC.log(f"[ledger] tshark stderr: {stderr_lines[:200]}", "WARNING")
     out = []
     for line in proc.stdout.splitlines():
         parts = line.split("|")
         if len(parts) < len(LEDGER_FIELDS):
             parts += [""] * (len(LEDGER_FIELDS) - len(parts))
         out.append(dict(zip(LEDGER_FIELDS, parts)))
-    VC.log(f"[ledger] {pcap.name}: {len(out):,} frames")
+    VC.log(f"[ledger] {pcap.name} extraction complete — {len(out):,} frames parsed")
     return out
 
 # ── OutputManager — universal Scattershot3 schema ────────────────────────────
@@ -619,6 +638,7 @@ PUBLIC_DNS = {"8.8.8.8","8.8.4.4","1.1.1.1","1.0.0.1","9.9.9.9","149.112.112.112
               "208.67.222.222","208.67.220.220","64.6.64.6","64.6.65.6"}
 
 def ext_check_hardcoded_dns(ledger, target, om):
+    VC.log(f"[ext/dns] Checking {target} for hardcoded public DNS resolvers...")
     queries_per_resolver: dict[str, set[str]] = defaultdict(set)
     for r in ledger:
         if r.get("ip.src") != target: continue
@@ -629,7 +649,10 @@ def ext_check_hardcoded_dns(ledger, target, om):
         if dst:
             queries_per_resolver[dst].add(r["dns.qry.name"])
     public_used = [d for d in queries_per_resolver if d in PUBLIC_DNS]
-    if not public_used: return
+    if not public_used:
+        VC.log(f"[ext/dns] Hardcoded DNS check complete — no public resolvers contacted by {target}")
+        return
+    VC.log(f"[ext/dns] Hardcoded DNS detected — {target} contacts {len(public_used)} public resolver(s): {', '.join(sorted(public_used))}")
     body = ["DNS resolvers contacted by " + target + ":\n"]
     for d, qs in sorted(queries_per_resolver.items()):
         tag = "(HARDCODED PUBLIC)" if d in PUBLIC_DNS else "(local)"
@@ -668,6 +691,7 @@ def ext_check_hardcoded_dns(ledger, target, om):
     )
 
 def ext_check_cleartext_dns(ledger, target, om):
+    VC.log(f"[ext/dns] Checking {target} for cleartext DNS queries...")
     queried_hosts: set[str] = set()
     for r in ledger:
         if r.get("ip.src") != target: continue
@@ -675,7 +699,10 @@ def ext_check_cleartext_dns(ledger, target, om):
             continue
         q = r.get("dns.qry.name") or ""
         if q: queried_hosts.add(q)
-    if not queried_hosts: return
+    if not queried_hosts:
+        VC.log(f"[ext/dns] Cleartext DNS check complete — no outbound DNS queries from {target}")
+        return
+    VC.log(f"[ext/dns] Cleartext DNS exposure found — {len(queried_hosts)} unique hostnames queried by {target}")
     ev_path = om.evidence_path(target, "cleartext_dns_queries.txt")
     ev_path.write_text("Cleartext DNS hostnames queried:\n" +
                        "\n".join(f"  {q}" for q in sorted(queried_hosts)),
@@ -707,6 +734,7 @@ def ext_check_cleartext_dns(ledger, target, om):
 def ext_check_tls_client_cert_cn(ledger, target, om):
     """When the device sends a TLS Certificate (handshake.type=11) to an
     external peer, capture the Subject CN — that's mTLS client-cert leak."""
+    VC.log(f"[ext/tls] Checking {target} for TLS client certificate CN leakage...")
     sample = None
     for r in ledger:
         if r.get("ip.src") != target: continue
@@ -717,8 +745,11 @@ def ext_check_tls_client_cert_cn(ledger, target, om):
         cn = (r.get("x509sat.uTF8String") or r.get("x509sat.printableString") or "")
         if cn:
             sample = (peer, cn); break
-    if not sample: return
+    if not sample:
+        VC.log(f"[ext/tls] Client cert CN check complete — no mTLS certificate leak from {target}")
+        return
     peer, cn = sample
+    VC.log(f"[ext/tls] Client cert CN leaked — {target} sends certificate to {peer} with subject: {cn[:80]}")
     ev_path = om.evidence_path(target, "tls_client_cert_cn.txt")
     ev_path.write_text(f"TLS Certificate sent by {target} → {peer}\n"
                        f"x509 Subject content (first):\n  {cn}\n", encoding="utf-8")
@@ -750,6 +781,7 @@ def ext_check_tls_client_cert_cn(ledger, target, om):
 LEGACY_CBC_SUITES = {"0xc024","0xc023","0xc028","0xc027","0xc013","0xc014",
                      "0x002f","0x0035","0x003c","0x003d","0x0009","0x002f"}
 def ext_check_tls_cbc_ciphers(ledger, target, om):
+    VC.log(f"[ext/tls] Checking {target} for legacy CBC cipher suite offers...")
     seen_cbc: set[str] = set()
     for r in ledger:
         if r.get("ip.src") != target: continue
@@ -759,7 +791,10 @@ def ext_check_tls_cbc_ciphers(ledger, target, om):
             s = s.strip()
             if s in LEGACY_CBC_SUITES:
                 seen_cbc.add(s)
-    if not seen_cbc: return
+    if not seen_cbc:
+        VC.log(f"[ext/tls] CBC cipher check complete — no legacy CBC suites offered by {target}")
+        return
+    VC.log(f"[ext/tls] Legacy CBC suites detected — {target} offers {len(seen_cbc)} CBC cipher(s)")
     ev_path = om.evidence_path(target, "tls_cbc_ciphers.txt")
     ev_path.write_text(
         f"TLS ClientHello cipher suites offered by {target}\n"
@@ -794,6 +829,7 @@ def ext_check_tls_cbc_ciphers(ledger, target, om):
 
 def ext_check_dhcp_hostname(ledger, target, om):
     """DHCP option 12 leaking an identifier."""
+    VC.log(f"[ext/dhcp] Checking {target} for DHCP hostname disclosure...")
     hostnames: set[str] = set()
     for r in ledger:
         # DHCP source 0.0.0.0 or assigned IP; we don't always know target before lease
@@ -802,7 +838,10 @@ def ext_check_dhcp_hostname(ledger, target, om):
             hostnames.add(h)
     # Match against any hostname; if exactly the target appeared in DHCP, flag
     hostnames = {h for h in hostnames if h}
-    if not hostnames: return
+    if not hostnames:
+        VC.log(f"[ext/dhcp] DHCP hostname check complete — no option 12 leak for {target}")
+        return
+    VC.log(f"[ext/dhcp] DHCP hostname leak detected — {len(hostnames)} identifier(s) broadcast by {target}")
     ev_path = om.evidence_path(target, "dhcp_hostname.txt")
     ev_path.write_text(
         f"DHCP Option 12 hostname values observed:\n  " +
@@ -835,6 +874,7 @@ def ext_check_dhcp_hostname(ledger, target, om):
 def ext_check_dns_suffix_appending(ledger, target, om):
     """Detect FQDN.<search-suffix> pattern in DNS queries — RFC 1535/8767
     violation by the resolver."""
+    VC.log(f"[ext/dns] Checking {target} for DNS search-suffix appending bugs...")
     bad_queries: set[str] = set()
     for r in ledger:
         if r.get("ip.src") != target: continue
@@ -855,7 +895,10 @@ def ext_check_dns_suffix_appending(ledger, target, om):
               "blob.core","akamai","fastly","cloudflare","cloudfront",
               "akadns","trafficmanager")):
             bad_queries.add(q)
-    if not bad_queries: return
+    if not bad_queries:
+        VC.log(f"[ext/dns] DNS suffix check complete — no search-suffix appending from {target}")
+        return
+    VC.log(f"[ext/dns] DNS suffix bug detected — {len(bad_queries)} suspect FQDN+suffix queries from {target}")
     ev_path = om.evidence_path(target, "dns_suffix_bug.txt")
     ev_path.write_text(
         f"Likely FQDN+search-suffix bug observed:\n  " +
@@ -917,6 +960,7 @@ def ext_check_outbound_protocol_catalogue(ledger, target, om):
     """Catalogue every unique outbound (destination, protocol, TLS version)
     seen from the target.  Emitted as an Informational finding that serves as
     the documented network baseline for the device."""
+    VC.log(f"[ext/catalogue] Building outbound protocol catalogue for {target}...")
 
     # 1. DNS reverse map (IP → FQDN) from observed A / AAAA answers
     ip_to_name: dict[str, str] = {}
@@ -996,7 +1040,10 @@ def ext_check_outbound_protocol_catalogue(ledger, target, om):
                 "dest_ip": dst, "dest_name": name,
             }
 
-    if not entries: return
+    if not entries:
+        VC.log(f"[ext/catalogue] Protocol catalogue complete — no outbound traffic from {target}")
+        return
+    VC.log(f"[ext/catalogue] Catalogued {len(entries)} unique (destination, protocol, TLS) combinations for {target}")
 
     sorted_entries = sorted(
         entries.values(),
@@ -1070,7 +1117,9 @@ EXTERNAL_CHECKS = [
 def ext_check_threat_intel_peers(ledger, target, om, threat_db):
     """Check every unique external peer against threat-intel blocklists."""
     if threat_db is None:
+        VC.log(f"[threat-intel] Skipping threat-intel check for {target} — no blocklist DB loaded")
         return
+    VC.log(f"[threat-intel] Checking external peers of {target} against threat-intel blocklists...")
     seen_peers: set[str] = set()
     for r in ledger:
         src = r.get("ip.src") or r.get("ipv6.src") or ""
@@ -1181,7 +1230,9 @@ def ext_check_threat_intel_peers(ledger, target, om, threat_db):
 def write_threat_intel_report(om, all_traffic, threat_db):
     """Write a consolidated threat_intel_report.json to the run dir."""
     if threat_db is None:
+        VC.log(f"[threat-intel] Skipping threat-intel report — no blocklist DB")
         return
+    VC.log(f"[threat-intel] Compiling consolidated threat-intel report across {len(all_traffic)} target(s)...")
     report: dict[str, dict] = {}
     total_ext_checked = 0
 
@@ -1242,13 +1293,17 @@ def write_threat_intel_report(om, all_traffic, threat_db):
 # ── Internal finding rules ───────────────────────────────────────────────────
 def int_check_smbv1(ledger, target, om):
     """smb.cmd field exists only for SMBv1 (smb2.cmd for SMB2/3)."""
+    VC.log(f"[int/smb] Checking {target} for SMBv1 traffic...")
     peers: set[str] = set()
     for r in ledger:
         if not r.get("smb.cmd"): continue
         if target not in (r.get("ip.src"), r.get("ip.dst")): continue
         peer = r.get("ip.dst") if r.get("ip.src") == target else r.get("ip.src")
         if peer and is_private(peer or ""): peers.add(peer)
-    if not peers: return
+    if not peers:
+        VC.log(f"[int/smb] SMBv1 check complete — no SMBv1 traffic for {target}")
+        return
+    VC.log(f"[int/smb] SMBv1 detected — {target} communicates via SMBv1 with {len(peers)} internal peer(s)")
     ev_path = om.evidence_path(target, "smbv1_peers.txt")
     ev_path.write_text("SMBv1 peers (private):\n  " + "\n  ".join(sorted(peers)),
                        encoding="utf-8")
@@ -1281,13 +1336,17 @@ def int_check_smbv1(ledger, target, om):
 def int_check_llmnr_nbtns(ledger, target, om):
     # LLMNR has no dedicated tshark field set — it rides on the DNS dissector.
     # Detect via frame.protocols containing 'llmnr'. NBT-NS has its own flags.
+    VC.log(f"[int/name] Checking {target} for LLMNR/NBT-NS broadcast name resolution...")
     seen_llmnr = any("llmnr" in (r.get("frame.protocols") or "").lower()
                      and target in (r.get("ip.src"), r.get("ip.dst"))
                      for r in ledger)
     seen_nbtns = any(r.get("nbns.flags") and target in (r.get("ip.src"), r.get("ip.dst"))
                      for r in ledger)
-    if not (seen_llmnr or seen_nbtns): return
+    if not (seen_llmnr or seen_nbtns):
+        VC.log(f"[int/name] LLMNR/NBT-NS check complete — no broadcast name resolution from {target}")
+        return
     parts = []
+    VC.log(f"[int/name] Broadcast name resolution detected — {target} uses {'LLMNR' if seen_llmnr else ''}{' + ' if seen_llmnr and seen_nbtns else ''}{'NBT-NS' if seen_nbtns else ''}")
     if seen_llmnr: parts.append("LLMNR (UDP/5355)")
     if seen_nbtns: parts.append("NetBIOS Name Service (UDP/137)")
     om.add_finding(
@@ -1319,13 +1378,17 @@ def int_check_ssdp(ledger, target, om):
     # SSDP is HTTP-over-UDP (port 1900); tshark dissects it via the HTTP
     # dissector and exposes it through frame.protocols rather than a
     # dedicated ssdp.* field set.
+    VC.log(f"[int/ssdp] Checking {target} for SSDP/UPnP discovery traffic...")
     peers: set[str] = set()
     for r in ledger:
         if "ssdp" not in (r.get("frame.protocols") or "").lower(): continue
         if target in (r.get("ip.src"), r.get("ip.dst")):
             peer = r.get("ip.dst") if r.get("ip.src") == target else r.get("ip.src")
             if peer: peers.add(peer)
-    if not peers: return
+    if not peers:
+        VC.log(f"[int/ssdp] SSDP check complete — no UPnP discovery traffic for {target}")
+        return
+    VC.log(f"[int/ssdp] SSDP traffic detected — {target} exchanges UPnP discovery with {len(peers)} peer(s)")
     om.add_finding(
         catalogue_id="PT-103",
         title="SSDP Broadcasts Expose Internal Services (UPnP Discovery)",
@@ -1350,12 +1413,16 @@ def int_check_ssdp(ledger, target, om):
 
 def int_check_mdns_internal_leak(ledger, target, om):
     """mDNS query/response activity from target on the internal segment."""
+    VC.log(f"[int/mdns] Checking {target} for mDNS activity...")
     activity = 0
     for r in ledger:
         if int(r.get("udp.dstport") or 0) == 5353 or int(r.get("udp.srcport") or 0) == 5353:
             if target in (r.get("ip.src"), r.get("ip.dst")):
                 activity += 1
-    if activity < 5: return
+    if activity < 5:
+        VC.log(f"[int/mdns] mDNS check complete — {activity} frames (below threshold of 5) for {target}")
+        return
+    VC.log(f"[int/mdns] mDNS activity detected — {activity:,} frames involving {target}")
     om.add_finding(
         catalogue_id="PT-104",
         title="mDNS Activity on Internal Segment (Device Discovery Surface)",
@@ -1381,12 +1448,16 @@ def int_check_mdns_internal_leak(ledger, target, om):
 
 def int_check_lldp(ledger, target, om):
     """LLDP TLVs received by the target (or sent) — switch info disclosure."""
+    VC.log(f"[int/lldp] Checking {target} for LLDP topology disclosure...")
     samples: set[str] = set()
     for r in ledger:
         s = r.get("lldp.tlv.system.name"); d = r.get("lldp.tlv.system.desc")
         if s or d:
             samples.add(f"{s or '?'} / {d or '?'}")
-    if not samples: return
+    if not samples:
+        VC.log(f"[int/lldp] LLDP check complete — no LLDP TLVs observed for {target}")
+        return
+    VC.log(f"[int/lldp] LLDP disclosure detected — {len(samples)} unique system identity TLV(s) on segment")
     om.add_finding(
         catalogue_id="PT-105",
         title="LLDP Topology / Switch Firmware Information Disclosure",
@@ -1410,14 +1481,19 @@ def int_check_lldp(ledger, target, om):
 
 def int_check_arp_anomalies(ledger, target, om):
     """Detect duplicate IP-to-MAC mappings or excessive gratuitous ARP."""
+    VC.log(f"[int/arp] Checking for ARP anomalies (duplicate IP-to-MAC mappings)...")
     mac_for_ip: dict[str, set[str]] = defaultdict(set)
     for r in ledger:
         ip = r.get("arp.src.proto_ipv4") or ""
         mac = r.get("arp.src.hw_mac") or ""
         if ip and mac:
             mac_for_ip[ip].add(mac)
+    VC.log(f"[int/arp] ARP table built — {len(mac_for_ip)} unique IPs with ARP entries")
     dupes = {ip: macs for ip, macs in mac_for_ip.items() if len(macs) > 1}
-    if not dupes: return
+    if not dupes:
+        VC.log(f"[int/arp] ARP check complete — no duplicate IP-to-MAC mappings detected")
+        return
+    VC.log(f"[int/arp] ARP anomalies detected — {len(dupes)} IP(s) have multiple MAC addresses — running spoofing analysis...")
     body = "\n".join(f"  {ip} → {', '.join(sorted(macs))}"
                      for ip, macs in dupes.items())
     om.add_finding(
@@ -1445,13 +1521,17 @@ def int_check_arp_anomalies(ledger, target, om):
 
 def int_check_cleartext_ftp(ledger, target, om):
     """ftp.request.command captured = cleartext FTP."""
+    VC.log(f"[int/ftp] Checking {target} for cleartext FTP traffic...")
     peers: set[str] = set()
     for r in ledger:
         if not r.get("ftp.request.command"): continue
         if target in (r.get("ip.src"), r.get("ip.dst")):
             peer = r.get("ip.dst") if r.get("ip.src") == target else r.get("ip.src")
             if peer: peers.add(peer)
-    if not peers: return
+    if not peers:
+        VC.log(f"[int/ftp] FTP check complete — no cleartext FTP involving {target}")
+        return
+    VC.log(f"[int/ftp] Cleartext FTP detected — {target} communicates with {len(peers)} peer(s) over unencrypted FTP")
     om.add_finding(
         catalogue_id="PT-107",
         title="Cleartext FTP Traffic Observed (credentials in plaintext)",
@@ -1476,13 +1556,17 @@ def int_check_cleartext_ftp(ledger, target, om):
     )
 
 def int_check_cleartext_telnet(ledger, target, om):
+    VC.log(f"[int/telnet] Checking {target} for cleartext Telnet traffic...")
     peers: set[str] = set()
     for r in ledger:
         if not r.get("telnet.data"): continue
         if target in (r.get("ip.src"), r.get("ip.dst")):
             peer = r.get("ip.dst") if r.get("ip.src") == target else r.get("ip.src")
             if peer: peers.add(peer)
-    if not peers: return
+    if not peers:
+        VC.log(f"[int/telnet] Telnet check complete — no cleartext Telnet involving {target}")
+        return
+    VC.log(f"[int/telnet] Cleartext Telnet detected — {target} communicates with {len(peers)} peer(s)")
     om.add_finding(
         catalogue_id="PT-108",
         title="Cleartext Telnet Traffic Observed",
@@ -1504,12 +1588,16 @@ def int_check_cleartext_telnet(ledger, target, om):
     )
 
 def int_check_snmp_community(ledger, target, om):
+    VC.log(f"[int/snmp] Checking {target} for SNMP community strings in cleartext...")
     communities: set[str] = set()
     for r in ledger:
         c = r.get("snmp.community")
         if c and target in (r.get("ip.src"), r.get("ip.dst")):
             communities.add(c)
-    if not communities: return
+    if not communities:
+        VC.log(f"[int/snmp] SNMP check complete — no cleartext community strings for {target}")
+        return
+    VC.log(f"[int/snmp] SNMP community strings detected — {len(communities)} unique string(s) in cleartext for {target}")
     om.add_finding(
         catalogue_id="PT-109",
         title="SNMPv1/v2c Community String Observed in Cleartext",
@@ -1532,13 +1620,17 @@ def int_check_snmp_community(ledger, target, om):
     )
 
 def int_check_http_basic_auth(ledger, target, om):
+    VC.log(f"[int/http] Checking {target} for HTTP Basic Auth in cleartext...")
     sites: set[str] = set()
     for r in ledger:
         if not r.get("http.authbasic"): continue
         if target in (r.get("ip.src"), r.get("ip.dst")):
             host = r.get("http.host") or "(unknown)"
             sites.add(host)
-    if not sites: return
+    if not sites:
+        VC.log(f"[int/http] HTTP Basic Auth check complete — no cleartext auth headers for {target}")
+        return
+    VC.log(f"[int/http] HTTP Basic Auth detected — cleartext credentials on {len(sites)} site(s) involving {target}")
     om.add_finding(
         catalogue_id="PT-110",
         title="HTTP Basic Authentication Observed in Cleartext",
@@ -1564,10 +1656,14 @@ def int_check_ldap_cleartext(ledger, target, om):
     # tshark exposes LDAP bind requests as 'ldap.bindRequest_element' (the
     # ASN.1 sequence element wrapper). The bare 'ldap.bindRequest' name does
     # not exist as an extractable field.
+    VC.log(f"[int/ldap] Checking {target} for cleartext LDAP bind requests...")
     seen = any(r.get("ldap.bindRequest_element") and
                target in (r.get("ip.src"), r.get("ip.dst"))
                for r in ledger)
-    if not seen: return
+    if not seen:
+        VC.log(f"[int/ldap] LDAP check complete — no cleartext LDAP bind involving {target}")
+        return
+    VC.log(f"[int/ldap] Cleartext LDAP bind detected — unencrypted LDAP bind request involving {target}")
     om.add_finding(
         catalogue_id="PT-111",
         title="LDAP Bind Observed Without TLS",
@@ -1601,6 +1697,7 @@ _KRB_MSG = {"10":"AS-REQ", "11":"AS-REP", "12":"TGS-REQ", "13":"TGS-REP",
             "14":"AP-REQ", "15":"AP-REP", "30":"ERROR"}
 
 def int_check_kerberos_artifacts(ledger, target, om):
+    VC.log(f"[int/kerberos] Checking {target} for Kerberos authentication traffic...")
     msgs: list = []
     for f in ledger:
         mt = f.get("kerberos.msg_type", "")
@@ -1615,7 +1712,9 @@ def int_check_kerberos_artifacts(ledger, target, om):
                       "cname": cn, "sname": sn, "realm": rl,
                       "src": src, "dst": dst})
     if not msgs:
+        VC.log(f"[int/kerberos] Kerberos check complete — no Kerberos traffic involving {target}")
         return
+    VC.log(f"[int/kerberos] Kerberos traffic captured — {len(msgs)} messages involving {target}")
     out_dir = om.evidence_root(target) / "kerberos"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{target.replace(':','_')}_kerberos_artifacts.txt"
@@ -1669,6 +1768,7 @@ def int_check_kerberos_artifacts(ledger, target, om):
 # Both indicate downstream relay-feasibility.
 
 def int_check_ntlm_relay_surface(ledger, target, om):
+    VC.log(f"[int/ntlm] Checking {target} for NTLM relay surface (unsigned NTLM/SMB2)...")
     ntlm_no_sign = 0
     smb_no_sign  = 0
     samples = []
@@ -1696,7 +1796,11 @@ def int_check_ntlm_relay_surface(ledger, target, om):
             except (ValueError, TypeError):
                 pass
     if ntlm_no_sign == 0 and smb_no_sign < 5:
+        VC.log(f"[int/ntlm] NTLM relay check complete — no unsigned NTLM/SMB2 for {target} "
+               f"(ntlm_no_sign={ntlm_no_sign}, smb_no_sign={smb_no_sign})")
         return
+    VC.log(f"[int/ntlm] NTLM relay surface detected — {ntlm_no_sign} unsigned NTLMSSP, "
+           f"{smb_no_sign} unsigned SMB2 frames for {target}")
     out_dir = om.evidence_root(target) / "ntlm"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{target.replace(':','_')}_ntlm_relay_surface.txt"
@@ -1741,6 +1845,7 @@ def int_check_ntlm_relay_surface(ledger, target, om):
 # correlate against well-known threat-actor JA3 catalogues (FoxIO, JA4-DB).
 
 def int_check_ja3_fingerprints(ledger, target, om):
+    VC.log(f"[int/tls] Capturing JA3/JA3S TLS fingerprints for {target}...")
     ja3_seen:  dict[str, int] = {}
     ja3s_seen: dict[str, int] = {}
     for f in ledger:
@@ -1752,7 +1857,9 @@ def int_check_ja3_fingerprints(ledger, target, om):
         if j:  ja3_seen[j]  = ja3_seen.get(j,  0) + 1
         if js: ja3s_seen[js] = ja3s_seen.get(js, 0) + 1
     if not ja3_seen and not ja3s_seen:
+        VC.log(f"[int/tls] JA3 check complete — no TLS fingerprints captured for {target}")
         return
+    VC.log(f"[int/tls] JA3 fingerprints captured — {len(ja3_seen)} client, {len(ja3s_seen)} server for {target}")
     out_dir = om.evidence_root(target) / "tls"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{target.replace(':','_')}_ja3.txt"
@@ -1798,6 +1905,7 @@ def int_check_ja3_fingerprints(ledger, target, om):
 # dedicated extractors for the relevant fields.
 
 def int_check_ipp_mqtt_amqp_cleartext(ledger, target, om):
+    VC.log(f"[int/iot] Checking {target} for cleartext IPP/MQTT/AMQP traffic...")
     proto_counts = {"ipp": 0, "mqtt": 0, "amqp": 0}
     proto_remote = {"ipp": set(), "mqtt": set(), "amqp": set()}
     for f in ledger:
@@ -1809,6 +1917,11 @@ def int_check_ipp_mqtt_amqp_cleartext(ledger, target, om):
             if p in protos:
                 proto_counts[p] += 1
                 proto_remote[p].add(src if dst == target else dst)
+    active = {p: n for p, n in proto_counts.items() if n > 0}
+    if not active:
+        VC.log(f"[int/iot] IPP/MQTT/AMQP check complete — no cleartext IoT protocols involving {target}")
+        return
+    VC.log(f"[int/iot] Cleartext IoT protocols detected for {target}: {', '.join(f'{p.upper()}={n}' for p, n in active.items())}")
     out_dir = om.evidence_root(target) / "iot"
     out_dir.mkdir(parents=True, exist_ok=True)
     for p, n in proto_counts.items():
@@ -1876,28 +1989,38 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
     """Run all checks for one target and write per-target traffic rollup."""
     VC.status(f"target_{ip}", f"Target {ip}", "running", "starting", 0, 0)
     VC.target(ip=ip, scope=scope)
+    VC.log(f"[analyse] Beginning analysis of target {ip} (scope={scope}, include_internal={include_internal})")
 
     # External rules
-    for fn in EXTERNAL_CHECKS:
+    VC.log(f"[analyse] Running {len(EXTERNAL_CHECKS)} external checks against {ip}...")
+    for i, fn in enumerate(EXTERNAL_CHECKS, 1):
         try:    fn(ledger, ip, om)
-        except Exception as e: VC.error(f"external check {fn.__name__} failed: {e}")
+        except Exception as e: VC.error(f"external check {fn.__name__} failed on {ip}: {e}")
+    VC.log(f"[analyse] External checks complete for {ip}")
 
     # Threat-intelligence peer check (runs after standard external checks)
     try:
         ext_check_threat_intel_peers(ledger, ip, om, threat_db)
     except Exception as e:
-        VC.error(f"threat-intel check failed: {e}")
+        VC.error(f"threat-intel check failed on {ip}: {e}")
 
     # Internal rules (opt-in)
     if include_internal:
+        VC.log(f"[analyse] Running {len(INTERNAL_CHECKS)} internal checks against {ip}...")
         for fn in INTERNAL_CHECKS:
             try:    fn(ledger, ip, om)
-            except Exception as e: VC.error(f"internal check {fn.__name__} failed: {e}")
+            except Exception as e: VC.error(f"internal check {fn.__name__} failed on {ip}: {e}")
+        VC.log(f"[analyse] Internal checks complete for {ip}")
+    else:
+        VC.log(f"[analyse] Internal checks skipped for {ip} (include_internal=False)")
 
     # Per-target rollup for Traffic tab
+    VC.log(f"[analyse] Building per-target traffic rollup for {ip}...")
     roll = rollup_target(ledger, ip)
     peers = roll["peers"]
+    VC.log(f"[analyse] Rollup complete — {len(peers)} unique peers, {len(roll['protocols'])} protocols observed for {ip}")
     # Classify each peer and emit port events
+    VC.log(f"[analyse] Classifying {len(peers)} peers for {ip} (category, org, purpose)...")
     ext_list, int_list = [], []
     for peer_ip, p in peers.items():
         cat, org, purpose = classify_peer(peer_ip, p["snis"])
@@ -1937,6 +2060,7 @@ def analyse_target(ip: str, ledger: list[dict], om: OutputManager,
 
 def _discover_ips(ledger: list[dict], exclude: "set[str] | None" = None) -> list[str]:
     """Extract all unique IPs from the ledger for hunt mode."""
+    VC.log(f"[hunt] Auto-discovering IPs from {len(ledger):,} ledger frames...")
     ips: set[str] = set()
     skip = exclude or set()
     for r in ledger:
@@ -1994,6 +2118,11 @@ def main() -> int:
         except Exception as e:
             VC.error(f"Cannot read ignore file: {e}")
 
+    VC.log(f"[init] Tooling check: tshark={'found' if TSHARK else 'MISSING'}"
+           f"  editcap={'found' if EDITCAP else 'MISSING'}"
+           f"  capinfos={'found' if CAPINFOS else 'MISSING'}")
+    if TSHARK:
+        VC.log(f"[init] tshark path: {TSHARK}")
     if not TSHARK:
         VC.error(
             "tshark not found. Searched PATH and standard install locations "
@@ -2005,6 +2134,7 @@ def main() -> int:
 
     om = OutputManager(args.output_dir, scope=args.scope,
                        include_internal=args.include_internal)
+    VC.log(f"[init] Output directory initialised: {om.root}")
 
     # §13b/§14j/§14k: bring up the run-dir audit log + own-version startup EVENT.
     global _RUNLOG
@@ -2048,13 +2178,15 @@ def main() -> int:
 
     mode_label = "hunt" if hunt_mode else "targeted"
     VC.log(f"trawler v{VERSION} — mode={mode_label} scope={args.scope} "
-           f"include_internal={args.include_internal}")
+           f"include_internal={args.include_internal} "
+           f"managed={'yes' if _VANTAGE_MANAGED else 'no'}")
     if ignore_ips:
         VC.log(f"ignoring: {', '.join(sorted(ignore_ips))}")
     VC.log(f"pcaps: {len(args.pcap)}" +
            (f"  targets: {len(target_list)}" if target_list else "  targets: auto-discover (hunt)"))
 
     # Phase 1: normalise + extract
+    VC.log(f"[phase1] Starting capture loading — {len(args.pcap)} pcap file(s) to process")
     VC.status("load_captures", "Load Captures", "running", "", 0, len(args.pcap))
     norm_dir = Path(args.output_dir) / "_normalised"
     norm_dir.mkdir(exist_ok=True)
@@ -2063,10 +2195,24 @@ def main() -> int:
         path = Path(pp)
         if not path.exists():
             VC.error(f"pcap not found: {pp}"); continue
+        VC.log(f"[phase1] Processing capture {i}/{len(args.pcap)}: {path.name}")
+        # Capture stats via capinfos (if available)
+        if CAPINFOS:
+            try:
+                ci = subprocess.run([CAPINFOS, "-c", "-u", "-a", "-e", str(path)],
+                                    capture_output=True, text=True, timeout=60)
+                if ci.returncode == 0:
+                    VC.log(f"[phase1] capinfos: {ci.stdout.strip().splitlines()[-1] if ci.stdout.strip() else 'no output'}")
+            except Exception:
+                pass
         npath = normalise_capture(path, norm_dir)
+        pre_count = len(combined_ledger)
         combined_ledger.extend(extract_ledger(npath))
+        added = len(combined_ledger) - pre_count
+        VC.log(f"[phase1] {path.name} contributed {added:,} frames (running total: {len(combined_ledger):,})")
         VC.status("load_captures", "Load Captures", "running",
                   f"{path.name}", i, len(args.pcap))
+    VC.log(f"[phase1] Capture loading complete — {len(combined_ledger):,} total frames from {len(args.pcap)} file(s)")
     VC.status("load_captures", "Load Captures", "complete",
               f"{len(combined_ledger):,} total frames")
 
@@ -2100,9 +2246,11 @@ def main() -> int:
                    args.include_internal)
 
     # Phase 2: per-target analysis
+    VC.log(f"[phase2] Starting per-target analysis — {len(target_list)} target(s) to analyse")
     traffic_rollup = {}
     targets_summary = []
-    for ip in target_list:
+    for idx, ip in enumerate(target_list, 1):
+        VC.log(f"[phase2] Analysing target {idx}/{len(target_list)}: {ip}")
         rec = analyse_target(ip, combined_ledger, om, args.include_internal,
                              args.scope, threat_db=_threat_db)
         traffic_rollup[ip] = rec
@@ -2119,28 +2267,38 @@ def main() -> int:
             "finding_count": 0,
         })
 
+    VC.log(f"[phase2] All targets analysed — writing traffic rollup and target summary...")
     om.write_traffic(traffic_rollup)
+    VC.log(f"[output] traffic.json written ({len(traffic_rollup)} targets)")
     om.write_targets(targets_summary)
+    VC.log(f"[output] targets.json written ({len(targets_summary)} hosts)")
 
     # Consolidated threat-intelligence report
+    VC.log(f"[phase2] Generating consolidated threat-intelligence report...")
     try:
         write_threat_intel_report(om, traffic_rollup, _threat_db)
     except Exception as exc:
         VC.error(f"Threat-intel report failed: {exc}")
 
     # Inventory dumps
+    ext_peer_count = sum(len(r["external_peers"]) for r in traffic_rollup.values())
+    VC.log(f"[output] Writing inventory — {ext_peer_count} external peers")
     om.write_inventory("external_peers",
         [p for r in traffic_rollup.values() for p in r["external_peers"]])
     if args.include_internal:
+        int_peer_count = sum(len(r["internal_peers"]) for r in traffic_rollup.values())
+        VC.log(f"[output] Writing inventory — {int_peer_count} internal peers")
         om.write_inventory("internal_peers",
             [p for r in traffic_rollup.values() for p in r["internal_peers"]])
 
     # Phase 3: summary
+    VC.log(f"[phase3] Building scan summary...")
     try:
         findings = json.loads(om.findings_json.read_text(encoding="utf-8"))
     except Exception:
         findings = []
     risk_counts = Counter((f.get("risk") or "INFO").upper() for f in findings)
+    VC.log(f"[phase3] Findings breakdown: {dict(risk_counts)} (total: {len(findings)})")
     om.write_summary({
         "mode":              mode_label,
         "targets_analysed":  len(target_list),
@@ -2151,7 +2309,10 @@ def main() -> int:
         "include_internal":  args.include_internal,
     })
 
+    VC.log(f"[output] summary.json written")
+
     # Phase 4: cross-tool action items
+    VC.log(f"[phase4] Generating cross-tool action items from {len(findings)} findings...")
     _generate_cross_tool_action_items(om, findings, traffic_rollup)
 
     VC.log(f"Scan complete. Findings: {len(findings)} "
@@ -2164,6 +2325,7 @@ def main() -> int:
 def _generate_cross_tool_action_items(om: OutputManager, findings: list,
                                        traffic_rollup: dict) -> None:
     """Emit Scattershot3 action items based on Trawler traffic analysis."""
+    VC.log(f"[cross-tool] Evaluating {len(findings)} findings for cross-tool action items...")
     _SS3_TRIGGER_CATALOGUES = {
         "PT-101": ("SMBv1 traffic — scan for EternalBlue and SMB vulnerabilities",
                    "CRITICAL"),
