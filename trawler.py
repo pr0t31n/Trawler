@@ -3,7 +3,7 @@
 trawler.py — pr0t31n toolkit pcap-based traffic analyser.
 
 Performs passive analysis of one or more packet captures and emits security
-findings in the universal Scattershot3/Vantage schema.
+findings in the universal Scattershot3/Crucible schema.
 
 Modes:
   targeted (default when --target or --targets-file provided)
@@ -31,8 +31,8 @@ Usage:
   # Hunt mode implied (no target given)
   trawler.py --pcap CAP --output-dir DIR
 
-When run under VANTAGE_MANAGED=1, emits __VANTAGE_LOG__:, __VANTAGE_STATUS__:,
-__VANTAGE_TARGET__: and __VANTAGE_PORT__: tokens consumed by Vantage.
+When run under CRUCIBLE_MANAGED=1, emits __CRUCIBLE_LOG__:, __CRUCIBLE_STATUS__:,
+__CRUCIBLE_TARGET__: and __CRUCIBLE_PORT__: tokens consumed by Crucible.
 """
 from __future__ import annotations
 
@@ -74,16 +74,16 @@ except ImportError:
     _ti = None
     _HAVE_THREAT_INTEL = False
 
-# ── Vantage protocol tokens ───────────────────────────────────────────────────
-_VANTAGE_MANAGED = os.environ.get("VANTAGE_MANAGED", "") == "1"
-_VP_LOG    = "__VANTAGE_LOG__:"
-_VP_ERR    = "__VANTAGE_ERR__:"
-_VP_STATUS = "__VANTAGE_STATUS__:"
-_VP_TARGET = "__VANTAGE_TARGET__:"
-_VP_PORT   = "__VANTAGE_PORT__:"
+# ── Crucible protocol tokens ───────────────────────────────────────────────────
+_CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+_CP_LOG    = "__CRUCIBLE_LOG__:"
+_CP_ERR    = "__CRUCIBLE_ERR__:"
+_CP_STATUS = "__CRUCIBLE_STATUS__:"
+_CP_TARGET = "__CRUCIBLE_TARGET__:"
+_CP_PORT   = "__CRUCIBLE_PORT__:"
 
 # ── Tooling discovery ─────────────────────────────────────────────────────────
-# When Trawler runs under Vantage's daemon (no interactive PATH), shutil.which
+# When Trawler runs under Crucible's daemon (no interactive PATH), shutil.which
 # misses Wireshark binaries that were installed via the macOS .app bundle, the
 # Homebrew/Apple-Silicon paths, or Windows Program Files. Fall back to a list
 # of well-known install locations after the PATH lookup fails.
@@ -110,9 +110,9 @@ TSHARK   = _find_tool("tshark")
 EDITCAP  = _find_tool("editcap")
 CAPINFOS = _find_tool("capinfos")
 
-# ── Console / Vantage protocol emitter ────────────────────────────────────────
+# ── Console / Crucible protocol emitter ────────────────────────────────────────
 class VC:
-    """Dual-mode console — ANSI when interactive, protocol tokens under Vantage."""
+    """Dual-mode console — ANSI when interactive, protocol tokens under Crucible."""
     _lock = threading.Lock()
 
     @classmethod
@@ -125,10 +125,10 @@ class VC:
                 else:                           _RUNLOG.info(message)
             except Exception:
                 pass
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "level": level, "message": message}
-                sys.stdout.write(_VP_LOG + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_LOG + json.dumps(entry) + "\n")
                 sys.stdout.flush()
         else:
             tag = {"INFO":"[*]","SUCCESS":"[+]","WARNING":"[~]","ERROR":"[!]"}.get(level,"[*]")
@@ -139,11 +139,11 @@ class VC:
         if _RUNLOG is not None:
             try: _RUNLOG.error(f"{message} {detail}".strip())
             except Exception: pass
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "source": source, "message": message,
                          "detail": detail, "category": "Scan"}
-                sys.stderr.write(_VP_ERR + json.dumps(entry) + "\n")
+                sys.stderr.write(_CP_ERR + json.dumps(entry) + "\n")
                 sys.stderr.flush()
         else:
             print(f"[{_hms()}] [!] {message}  {detail}", file=sys.stderr, flush=True)
@@ -157,12 +157,12 @@ class VC:
                 _RUNLOG.event(f"phase {phase}: {status}" + (f" — {step}" if step else ""))
             except Exception:
                 pass
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
                 entry = {"phase": phase, "label": label or phase, "status": status,
                          "step": step, "progress": progress, "total": total,
                          "ts": _iso()}
-                sys.stdout.write(_VP_STATUS + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_STATUS + json.dumps(entry) + "\n")
                 sys.stdout.flush()
         else:
             prog = f" [{progress}/{total}]" if total else ""
@@ -174,29 +174,29 @@ class VC:
     @classmethod
     def target(cls, ip: str, hostname: str | None = None,
                scope: str | None = None) -> None:
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "ip": ip, "hostname": hostname,
                          "scope": scope, "alive": True, "source": "trawler"}
-                sys.stdout.write(_VP_TARGET + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_TARGET + json.dumps(entry) + "\n")
                 sys.stdout.flush()
 
     @classmethod
     def port(cls, ip: str, port: int, proto: str = "tcp",
              name: str = "", scope: str | None = None) -> None:
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
                 entry = {"ts": _iso(), "ip": ip, "port": int(port),
                          "proto": proto, "name": name, "scope": scope,
                          "state": "open"}
-                sys.stdout.write(_VP_PORT + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_PORT + json.dumps(entry) + "\n")
                 sys.stdout.flush()
 
     @classmethod
     def action_item(cls, item: dict) -> None:
-        if _VANTAGE_MANAGED:
+        if _CRUCIBLE_MANAGED:
             with cls._lock:
-                sys.stdout.write(_VP_LOG + json.dumps(
+                sys.stdout.write(_CP_LOG + json.dumps(
                     {"ts": _iso(), "level": "ACTION_ITEM",
                      "message": f"Action Item: {item.get('title', '')}"}) + "\n")
                 sys.stdout.flush()
@@ -2179,7 +2179,7 @@ def main() -> int:
     mode_label = "hunt" if hunt_mode else "targeted"
     VC.log(f"trawler v{VERSION} — mode={mode_label} scope={args.scope} "
            f"include_internal={args.include_internal} "
-           f"managed={'yes' if _VANTAGE_MANAGED else 'no'}")
+           f"managed={'yes' if _CRUCIBLE_MANAGED else 'no'}")
     if ignore_ips:
         VC.log(f"ignoring: {', '.join(sorted(ignore_ips))}")
     VC.log(f"pcaps: {len(args.pcap)}" +
