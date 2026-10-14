@@ -2244,6 +2244,15 @@ def main() -> int:
                    "hunt:all" if (hunt_mode and len(target_list) > 20)
                    else ", ".join(target_list[:20]),
                    args.include_internal)
+    try:
+        import pr0t31n_dep_snapshot as _ds
+        _ds.write_snapshot(
+            om.root, "trawler", VERSION,
+            binaries=["tshark", "editcap", "capinfos"],
+            pip_packages=[],
+        )
+    except Exception:
+        pass
 
     # Phase 2: per-target analysis
     VC.log(f"[phase2] Starting per-target analysis — {len(target_list)} target(s) to analyse")

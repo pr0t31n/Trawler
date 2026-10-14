@@ -18,6 +18,26 @@ def _run(cmd, check=True):
 def _has(binary): return shutil.which(binary) is not None
 
 
+
+def _dpkg_installed(pkg):
+    try:
+        r = subprocess.run(["dpkg", "-s", pkg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _rpm_installed(pkg):
+    try:
+        return subprocess.run(
+            ["rpm", "-q", pkg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def _pip_installed(pkg_spec):
     """Check whether a pip package is already importable."""
     import importlib.util
@@ -54,7 +74,14 @@ def install_system_deps():
 
     if sys.platform.startswith("linux") and _has("apt-get"):
         _run(["apt-get", "update"], check=False)
-        _run(["apt-get", "install", "-y"] + list(pkgs_to_install))
+        _all_pkgs = list(pkgs_to_install)
+        _needed = [p for p in _all_pkgs if not _dpkg_installed(p)]
+        if len(_needed) < len(_all_pkgs):
+            print(f"  {len(_all_pkgs) - len(_needed)} APT package(s) already installed")
+        if _needed:
+            _run(["apt-get", "install", "-y"] + _needed)
+        else:
+            print("  ✓ All APT packages already installed")
     elif sys.platform == "darwin" and _has("brew"):
         _run(["brew", "install", "wireshark"])
     elif _has("choco"):
