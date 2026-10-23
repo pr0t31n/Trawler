@@ -709,7 +709,7 @@ def ext_check_cleartext_dns(ledger, target, om):
                        encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-002",
-        title="Traffic Analysis: Cleartext DNS Exposes External Service Topology",
+        title="Information Disclosure: Cleartext DNS Exposes External Service Topology",
         ip=target, port=53, risk="LOW", service="dns", phase="external_dns",
         description=(
             "All DNS queries are sent over cleartext UDP/53. Any on-path observer "
@@ -849,7 +849,7 @@ def ext_check_dhcp_hostname(ledger, target, om):
         encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-005",
-        title="Traffic Analysis: DHCP Hostname Discloses Asset Identifier",
+        title="Information Disclosure: DHCP Hostname Discloses Asset Identifier",
         ip=target, port=68, risk="MEDIUM", service="dhcp",
         phase="external_dhcp",
         description=(
@@ -1534,7 +1534,7 @@ def int_check_cleartext_ftp(ledger, target, om):
     VC.log(f"[int/ftp] Cleartext FTP detected — {target} communicates with {len(peers)} peer(s) over unencrypted FTP")
     om.add_finding(
         catalogue_id="PT-107",
-        title="Traffic Analysis: Cleartext FTP Traffic Observed (credentials in plaintext)",
+        title="Insecure Protocol Detected: Cleartext FTP Traffic Observed (credentials in plaintext)",
         ip=target, port=21, risk="HIGH", service="ftp",
         phase="internal_cleartext",
         description=(

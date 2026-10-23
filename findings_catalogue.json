@@ -83,7 +83,7 @@
     },
     {
       "id": "PT-002",
-      "title": "Traffic Analysis: Cleartext DNS Exposes External Service Topology",
+      "title": "Information Disclosure: Cleartext DNS Exposes External Service Topology",
       "aliases": [
         "DNS leaks backend"
       ],
@@ -134,7 +134,7 @@
     },
     {
       "id": "PT-003",
-      "title": "Traffic Analysis: Device Identity Leaked in TLS Client Certificate (mTLS)",
+      "title": "Information Disclosure: Device Identity Leaked in TLS Client Certificate (mTLS)",
       "aliases": [
         "TLS client cert CN leak"
       ],
@@ -222,7 +222,7 @@
     },
     {
       "id": "PT-005",
-      "title": "Traffic Analysis: DHCP Hostname Discloses Asset Identifier",
+      "title": "Information Disclosure: DHCP Hostname Discloses Asset Identifier",
       "aliases": [
         "DHCP option 12 leak"
       ],
@@ -477,7 +477,7 @@
     },
     {
       "id": "PT-104",
-      "title": "Traffic Analysis: mDNS Activity Exposes Device Identity on Internal Segment",
+      "title": "Information Disclosure: mDNS Activity Exposes Device Identity on Internal Segment",
       "aliases": [
         "mDNS announce"
       ],
@@ -515,7 +515,7 @@
     },
     {
       "id": "PT-105",
-      "title": "Traffic Analysis: LLDP Topology / Switch Firmware Disclosure",
+      "title": "Information Disclosure: LLDP Topology / Switch Firmware Disclosure",
       "aliases": [
         "LLDP leak",
         "CDP leak"
@@ -606,7 +606,7 @@
     },
     {
       "id": "PT-107",
-      "title": "Traffic Analysis: Cleartext FTP Traffic Observed (credentials in plaintext)",
+      "title": "Insecure Protocol Detected: Cleartext FTP Traffic Observed (credentials in plaintext)",
       "aliases": [
         "FTP plaintext"
       ],
@@ -695,7 +695,7 @@
     },
     {
       "id": "PT-109",
-      "title": "Traffic Analysis: SNMPv1/v2c Community String in Cleartext",
+      "title": "Insecure Protocol Detected: SNMPv1/v2c Community String in Cleartext",
       "aliases": [
         "SNMP community"
       ],
