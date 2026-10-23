@@ -664,7 +664,7 @@ def ext_check_hardcoded_dns(ledger, target, om):
     ev_path.write_text(ev_text, encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-001",
-        title="Hardcoded Public DNS Resolvers Bypass Enterprise Controls",
+        title="Authentication Bypass: Hardcoded Public DNS Resolvers Bypass Enterprise Controls",
         ip=target, port=53, risk="MEDIUM", service="dns", phase="external_dns",
         description=(
             f"Device {target} sends DNS queries directly to public resolvers "
@@ -709,7 +709,7 @@ def ext_check_cleartext_dns(ledger, target, om):
                        encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-002",
-        title="Cleartext DNS Exposes External Service Topology",
+        title="Traffic Analysis: Cleartext DNS Exposes External Service Topology",
         ip=target, port=53, risk="LOW", service="dns", phase="external_dns",
         description=(
             "All DNS queries are sent over cleartext UDP/53. Any on-path observer "
@@ -802,7 +802,7 @@ def ext_check_tls_cbc_ciphers(ledger, target, om):
         encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-004",
-        title="TLS ClientHello Offers Legacy CBC Cipher Suites",
+        title="SSL/TLS Ciphers: TLS ClientHello Offers Legacy CBC Cipher Suites",
         ip=target, port=443, risk="LOW", service="tls",
         phase="external_tls",
         description=(
@@ -849,7 +849,7 @@ def ext_check_dhcp_hostname(ledger, target, om):
         encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-005",
-        title="DHCP Hostname Discloses Asset Identifier",
+        title="Traffic Analysis: DHCP Hostname Discloses Asset Identifier",
         ip=target, port=68, risk="MEDIUM", service="dhcp",
         phase="external_dhcp",
         description=(
@@ -906,7 +906,7 @@ def ext_check_dns_suffix_appending(ledger, target, om):
         encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-006",
-        title="DNS Search-Suffix Appended to Fully-Qualified Hostnames",
+        title="Traffic Analysis: DNS Search-Suffix Appended to Fully-Qualified Hostnames",
         ip=target, port=53, risk="MEDIUM", service="dns",
         phase="external_dns",
         description=(
@@ -1309,7 +1309,7 @@ def int_check_smbv1(ledger, target, om):
                        encoding="utf-8")
     om.add_finding(
         catalogue_id="PT-101",
-        title="SMBv1 Traffic Observed (EternalBlue / NotPetya exposure)",
+        title="SMB Vulnerability: SMBv1 Traffic Observed (EternalBlue / NotPetya exposure)",
         ip=target, port=445, risk="HIGH", service="smb",
         phase="internal_smb",
         description=(
@@ -1498,7 +1498,7 @@ def int_check_arp_anomalies(ledger, target, om):
                      for ip, macs in dupes.items())
     om.add_finding(
         catalogue_id="PT-106",
-        title="ARP Anomalies (Duplicate IP-to-MAC Mappings)",
+        title="Traffic Analysis: ARP Anomalies (Duplicate IP-to-MAC Mappings)",
         ip=target, port=0, risk="MEDIUM", service="arp",
         phase="internal_discovery",
         description=(
@@ -1534,7 +1534,7 @@ def int_check_cleartext_ftp(ledger, target, om):
     VC.log(f"[int/ftp] Cleartext FTP detected — {target} communicates with {len(peers)} peer(s) over unencrypted FTP")
     om.add_finding(
         catalogue_id="PT-107",
-        title="Cleartext FTP Traffic Observed (credentials in plaintext)",
+        title="Traffic Analysis: Cleartext FTP Traffic Observed (credentials in plaintext)",
         ip=target, port=21, risk="HIGH", service="ftp",
         phase="internal_cleartext",
         description=(
@@ -1569,7 +1569,7 @@ def int_check_cleartext_telnet(ledger, target, om):
     VC.log(f"[int/telnet] Cleartext Telnet detected — {target} communicates with {len(peers)} peer(s)")
     om.add_finding(
         catalogue_id="PT-108",
-        title="Cleartext Telnet Traffic Observed",
+        title="Insecure Protocol Detected: Cleartext Telnet Traffic Observed",
         ip=target, port=23, risk="HIGH", service="telnet",
         phase="internal_cleartext",
         description=(
@@ -1633,7 +1633,7 @@ def int_check_http_basic_auth(ledger, target, om):
     VC.log(f"[int/http] HTTP Basic Auth detected — cleartext credentials on {len(sites)} site(s) involving {target}")
     om.add_finding(
         catalogue_id="PT-110",
-        title="HTTP Basic Authentication Observed in Cleartext",
+        title="Authentication: HTTP Basic Authentication Observed in Cleartext",
         ip=target, port=80, risk="HIGH", service="http",
         phase="internal_cleartext",
         description=(
@@ -1666,7 +1666,7 @@ def int_check_ldap_cleartext(ledger, target, om):
     VC.log(f"[int/ldap] Cleartext LDAP bind detected — unencrypted LDAP bind request involving {target}")
     om.add_finding(
         catalogue_id="PT-111",
-        title="LDAP Bind Observed Without TLS",
+        title="Traffic Analysis: LDAP Bind Observed Without TLS",
         ip=target, port=389, risk="MEDIUM", service="ldap",
         phase="internal_cleartext",
         description=(

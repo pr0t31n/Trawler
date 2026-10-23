@@ -8,7 +8,7 @@
   "findings": [
     {
       "id": "PT-001",
-      "title": "Hardcoded Public DNS Resolvers Bypass Enterprise Controls",
+      "title": "Authentication Bypass: Hardcoded Public DNS Resolvers Bypass Enterprise Controls",
       "aliases": [
         "DNS resolver bypass"
       ],
@@ -83,7 +83,7 @@
     },
     {
       "id": "PT-002",
-      "title": "Cleartext DNS Exposes External Service Topology",
+      "title": "Traffic Analysis: Cleartext DNS Exposes External Service Topology",
       "aliases": [
         "DNS leaks backend"
       ],
@@ -134,7 +134,7 @@
     },
     {
       "id": "PT-003",
-      "title": "Device Identity Leaked in TLS Client Certificate (mTLS)",
+      "title": "Traffic Analysis: Device Identity Leaked in TLS Client Certificate (mTLS)",
       "aliases": [
         "TLS client cert CN leak"
       ],
@@ -179,7 +179,7 @@
     },
     {
       "id": "PT-004",
-      "title": "TLS ClientHello Offers Legacy CBC Cipher Suites",
+      "title": "SSL/TLS Ciphers: TLS ClientHello Offers Legacy CBC Cipher Suites",
       "aliases": [
         "TLS CBC offer"
       ],
@@ -222,7 +222,7 @@
     },
     {
       "id": "PT-005",
-      "title": "DHCP Hostname Discloses Asset Identifier",
+      "title": "Traffic Analysis: DHCP Hostname Discloses Asset Identifier",
       "aliases": [
         "DHCP option 12 leak"
       ],
@@ -267,7 +267,7 @@
     },
     {
       "id": "PT-006",
-      "title": "DNS Search-Suffix Appended to Fully-Qualified Hostnames",
+      "title": "Traffic Analysis: DNS Search-Suffix Appended to Fully-Qualified Hostnames",
       "aliases": [
         "FQDN+suffix bug"
       ],
@@ -308,7 +308,7 @@
     },
     {
       "id": "PT-101",
-      "title": "SMBv1 Traffic Observed (EternalBlue / NotPetya exposure)",
+      "title": "SMB Vulnerability: SMBv1 Traffic Observed (EternalBlue / NotPetya exposure)",
       "aliases": [
         "SMB1 in use",
         "CIFS legacy"
@@ -375,7 +375,7 @@
     },
     {
       "id": "PT-102",
-      "title": "LLMNR / NBT-NS Name Resolution in Use (Responder Surface)",
+      "title": "Network Misconfiguration: LLMNR / NBT-NS Name Resolution in Use (Responder Surface)",
       "aliases": [
         "NBT-NS",
         "Responder attack surface"
@@ -436,7 +436,7 @@
     },
     {
       "id": "PT-103",
-      "title": "SSDP / UPnP Broadcasts Expose Internal Services",
+      "title": "Network Misconfiguration: SSDP / UPnP Broadcasts Expose Internal Services",
       "aliases": [
         "UPnP discovery"
       ],
@@ -477,7 +477,7 @@
     },
     {
       "id": "PT-104",
-      "title": "mDNS Activity Exposes Device Identity on Internal Segment",
+      "title": "Traffic Analysis: mDNS Activity Exposes Device Identity on Internal Segment",
       "aliases": [
         "mDNS announce"
       ],
@@ -515,7 +515,7 @@
     },
     {
       "id": "PT-105",
-      "title": "LLDP Topology / Switch Firmware Disclosure",
+      "title": "Traffic Analysis: LLDP Topology / Switch Firmware Disclosure",
       "aliases": [
         "LLDP leak",
         "CDP leak"
@@ -556,7 +556,7 @@
     },
     {
       "id": "PT-106",
-      "title": "ARP Anomalies (Duplicate IP-to-MAC Mappings)",
+      "title": "Traffic Analysis: ARP Anomalies (Duplicate IP-to-MAC Mappings)",
       "aliases": [
         "ARP spoof signal",
         "gratuitous ARP storm"
@@ -606,7 +606,7 @@
     },
     {
       "id": "PT-107",
-      "title": "Cleartext FTP Traffic Observed (credentials in plaintext)",
+      "title": "Traffic Analysis: Cleartext FTP Traffic Observed (credentials in plaintext)",
       "aliases": [
         "FTP plaintext"
       ],
@@ -651,7 +651,7 @@
     },
     {
       "id": "PT-108",
-      "title": "Cleartext Telnet Traffic Observed",
+      "title": "Insecure Protocol Detected: Cleartext Telnet Traffic Observed",
       "aliases": [
         "Telnet plaintext"
       ],
@@ -695,7 +695,7 @@
     },
     {
       "id": "PT-109",
-      "title": "SNMPv1/v2c Community String in Cleartext",
+      "title": "Traffic Analysis: SNMPv1/v2c Community String in Cleartext",
       "aliases": [
         "SNMP community"
       ],
@@ -737,7 +737,7 @@
     },
     {
       "id": "PT-110",
-      "title": "HTTP Basic Authentication Observed in Cleartext",
+      "title": "Authentication: HTTP Basic Authentication Observed in Cleartext",
       "aliases": [
         "Basic Auth plaintext"
       ],
@@ -782,7 +782,7 @@
     },
     {
       "id": "PT-111",
-      "title": "LDAP Bind Observed Without TLS",
+      "title": "Traffic Analysis: LDAP Bind Observed Without TLS",
       "aliases": [
         "LDAP cleartext bind"
       ],
