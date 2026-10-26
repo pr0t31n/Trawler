@@ -76,11 +76,12 @@ except ImportError:
 
 # ── Crucible protocol tokens ───────────────────────────────────────────────────
 _CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
-_CP_LOG    = "__CRUCIBLE_LOG__:"
-_CP_ERR    = "__CRUCIBLE_ERR__:"
-_CP_STATUS = "__CRUCIBLE_STATUS__:"
-_CP_TARGET = "__CRUCIBLE_TARGET__:"
-_CP_PORT   = "__CRUCIBLE_PORT__:"
+_CP_LOG     = "__CRUCIBLE_LOG__:"
+_CP_ERR     = "__CRUCIBLE_ERR__:"
+_CP_STATUS  = "__CRUCIBLE_STATUS__:"
+_CP_TARGET  = "__CRUCIBLE_TARGET__:"
+_CP_PORT    = "__CRUCIBLE_PORT__:"
+_CP_FINDING = "__CRUCIBLE_FINDING__:"
 
 # ── Tooling discovery ─────────────────────────────────────────────────────────
 # When Trawler runs under Crucible's daemon (no interactive PATH), shutil.which
@@ -479,6 +480,23 @@ class OutputManager:
                 csv.DictWriter(f, fieldnames=self.CSV_FIELDS,
                                extrasaction="ignore").writerow(entry)
         VC.log(f"[finding] {risk:<8} {title} ({ip}:{port})", "SUCCESS")
+        if _CRUCIBLE_MANAGED:
+            try:
+                print(_CP_FINDING + json.dumps({
+                    "title": title, "ip": ip,
+                    "port": int(port) if port else 0,
+                    "hostname": hostname or "",
+                    "risk": (risk or "INFO").upper(),
+                    "description": description,
+                    "sources": sources,
+                    "service": service,
+                    "affected": affected,
+                    "cves": cves,
+                    "output_file": output_file,
+                    "remediation": remediation,
+                }, ensure_ascii=False), flush=True)
+            except Exception:
+                pass
 
     def write_targets(self, hosts: list[dict]) -> None:
         self.targets_json.write_text(
