@@ -386,6 +386,17 @@ class OutputManager:
                 p.write_text(init, encoding="utf-8")
         if not self.findings_csv.exists():
             self._write_csv_header()
+        self._fdb = None
+        _db_path = os.environ.get("PR0T31N_FINDINGS_DB")
+        if _db_path:
+            try:
+                import sys as _s
+                if "/opt/pr0t31n/shared" not in _s.path:
+                    _s.path.insert(0, "/opt/pr0t31n/shared")
+                import pr0t31n_findings_db
+                self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
+            except Exception:
+                self._fdb = None
 
     def _hdr(self, what: str) -> str:
         return (f"{'='*70}\n  trawler — {what}\n"
@@ -476,6 +487,11 @@ class OutputManager:
             tmp = self.findings_json.with_suffix(".tmp")
             tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
             tmp.replace(self.findings_json)
+            if self._fdb:
+                try:
+                    self._fdb.insert_finding(entry)
+                except Exception:
+                    pass
             with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=self.CSV_FIELDS,
                                extrasaction="ignore").writerow(entry)
