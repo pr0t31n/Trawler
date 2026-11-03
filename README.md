@@ -192,7 +192,7 @@ Per `CLAUDE.md` Section 3:
   Traffic tab and Findings tab.
 - **Prometheus** — `UniversalParser` ingests Trawler's universal
   `meta.json` automatically (no Trawler-specific parser needed).
-- **Arbiter** — `pr0t31n_catalogue.py merge` includes Trawler's
+- **Shared Catalogue** — `pr0t31n_catalogue.py merge` includes Trawler's
   `findings_catalogue.json` in the master catalogue.
 
 ## Version
