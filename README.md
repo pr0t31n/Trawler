@@ -23,8 +23,8 @@ three modes:
   excluded from auto-discovered targets in hunt mode and from explicit
   target lists. Multiple `--ignore` flags can be combined.
 
-Findings emit in the universal Scattershot3/Vantage schema and slot
-straight into Vantage's Findings + Traffic tabs, Crucible's evidence
+Findings emit in the universal Scattershot3/Crucible schema and slot
+straight into Crucible's Findings + Traffic tabs and evidence
 viewer, Prometheus's `UniversalParser`, and Bastion's ingest.
 
 ## Features
@@ -39,7 +39,7 @@ viewer, Prometheus's `UniversalParser`, and Bastion's ingest.
   peer lists with byte counts, ports, protocols, SNIs and finding counts.
 - Universal output layout (`meta.json`, `findings.{json,csv}`,
   `summary.json`, `targets.json`, `traffic.json`, `inventory/`, `evidence/`).
-- Runs under Vantage (`VANTAGE_MANAGED=1`) and emits the standard
+- Runs under Crucible (`CRUCIBLE_MANAGED=1`) and emits the standard
   `__VANTAGE_LOG__:` / `__VANTAGE_STATUS__:` / `__VANTAGE_TARGET__:` /
   `__VANTAGE_PORT__:` protocol tokens for live UI updates.
 
@@ -136,7 +136,7 @@ python3 trawler.py \
 ├── findings.json             # universal schema findings array
 ├── findings.csv              # CSV mirror
 ├── summary.json              # totals + risk counts
-├── targets.json              # per-host summary for Vantage Targets tab
+├── targets.json              # per-host summary for Crucible Targets tab
 ├── traffic.json              # per-host expanded peer lists (Traffic tab)
 ├── scan.log                  # human-readable
 ├── scan.log.json             # machine-readable JSON event log
@@ -175,12 +175,12 @@ python3 trawler.py \
 | PT-110 | HIGH | HTTP Basic Authentication in Cleartext |
 | PT-111 | MEDIUM | LDAP Bind without TLS |
 
-## Vantage integration
+## Crucible integration
 
-Trawler registers under the Vantage Flask UI alongside Scattershot3
-(`ss`) and OSift (`os`) with tool key `tr`. Vantage exposes a "Traffic"
+Trawler registers under the Crucible Flask UI alongside Scattershot3
+(`ss`) and OSift (`os`) with tool key `tr`. Crucible exposes a "Traffic"
 tab built from `traffic.json` showing per-host external/internal peer
-breakdowns. Vantage also auto-triggers Trawler on Scattershot3 scope
+breakdowns. Crucible also auto-triggers Trawler on Scattershot3 scope
 completion when SS produces capture files — the scope label (`int` /
 `ext`) is passed through so the appropriate rule set is selected.
 
@@ -188,7 +188,7 @@ completion when SS produces capture files — the scope label (`int` /
 
 Per `CLAUDE.md` Section 3:
 
-- **Vantage** — reads Trawler `findings.json` + `traffic.json` for the
+- **Crucible** — reads Trawler `findings.json` + `traffic.json` for the
   Traffic tab and Findings tab.
 - **Prometheus** — `UniversalParser` ingests Trawler's universal
   `meta.json` automatically (no Trawler-specific parser needed).
