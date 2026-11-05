@@ -88,8 +88,8 @@ viewer, Prometheus's `UniversalParser`, and Bastion's ingest.
 - Universal output layout (`meta.json`, `findings.{json,csv}`,
   `summary.json`, `targets.json`, `traffic.json`, `inventory/`, `evidence/`).
 - Runs under Crucible (`CRUCIBLE_MANAGED=1`) and emits the standard
-  `__VANTAGE_LOG__:` / `__VANTAGE_STATUS__:` / `__VANTAGE_TARGET__:` /
-  `__VANTAGE_PORT__:` protocol tokens for live UI updates.
+  `__CRUCIBLE_LOG__:` / `__CRUCIBLE_STATUS__:` / `__CRUCIBLE_TARGET__:` /
+  `__CRUCIBLE_PORT__:` protocol tokens for live UI updates.
 
 ## Requirements
 
