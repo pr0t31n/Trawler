@@ -27,6 +27,9 @@ Findings emit in the universal Scattershot3/Crucible schema and slot
 straight into Crucible's Findings + Traffic tabs and evidence
 viewer, Prometheus's `UniversalParser`, and Bastion's ingest.
 
+
+> **[View full documentation on the Codex Wiki](https://wiki.pr0t31n.com/tools/trawler)** — detailed features, CLI reference, findings catalogue, and integration guides.
+
 ## Features
 
 - Multi-format capture support — `.pcap` / `.pcapng` / `.cap` / `.ntar` /
