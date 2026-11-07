@@ -201,7 +201,7 @@ python3 trawler.py \
 
 ## Findings catalogue
 
-15+ entries in `findings_catalogue.json`:
+17 entries in `findings_catalogue.json`:
 
 | ID | Risk | Title |
 |---|---|---|
