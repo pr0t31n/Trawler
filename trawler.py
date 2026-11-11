@@ -76,6 +76,14 @@ except ImportError:
 
 # ── Crucible protocol tokens ───────────────────────────────────────────────────
 _CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+
+try:
+    import sys as _sys_ie
+    if "/opt/pr0t31n/shared" not in _sys_ie.path:
+        _sys_ie.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_intel_emitter as _ie
+except ImportError:
+    _ie = None
 _CP_LOG     = "__CRUCIBLE_LOG__:"
 _CP_ERR     = "__CRUCIBLE_ERR__:"
 _CP_STATUS  = "__CRUCIBLE_STATUS__:"
@@ -521,6 +529,27 @@ class OutputManager:
     def write_traffic(self, per_host: dict) -> None:
         self.traffic_json.write_text(
             json.dumps(per_host, indent=2), encoding="utf-8")
+        if _ie and _CRUCIBLE_MANAGED and per_host:
+            try:
+                _tc_rows = []
+                for _t_ip, _t_data in per_host.items():
+                    if not isinstance(_t_data, dict):
+                        continue
+                    for _peer in (_t_data.get("peers") or []):
+                        if not isinstance(_peer, dict):
+                            continue
+                        _tc_rows.append({
+                            "src_ip":    _t_ip,
+                            "dst_ip":    _peer.get("ip", ""),
+                            "protocol":  _peer.get("proto", ""),
+                            "bytes_sent": _peer.get("bytes_sent", 0),
+                            "bytes_recv": _peer.get("bytes_recv", 0),
+                            "packets":   _peer.get("packets", 0),
+                        })
+                if _tc_rows:
+                    _ie.emit_intel("traffic_conversation", _tc_rows, bulk=True)
+            except Exception:
+                pass
 
     def write_summary(self, summary: dict) -> None:
         summary["scan_meta"] = {
@@ -531,6 +560,26 @@ class OutputManager:
         }
         self.summary_json.write_text(
             json.dumps(summary, indent=2), encoding="utf-8")
+        if _ie and _CRUCIBLE_MANAGED and summary:
+            try:
+                _ts_rows = []
+                for _sk, _sv in summary.items():
+                    if _sk == "scan_meta":
+                        continue
+                    if isinstance(_sv, (int, float)):
+                        _ts_rows.append({
+                            "key": _sk, "numeric_value": _sv,
+                            "category": "trawler_summary",
+                        })
+                    elif isinstance(_sv, str):
+                        _ts_rows.append({
+                            "key": _sk, "value": _sv,
+                            "category": "trawler_summary",
+                        })
+                if _ts_rows:
+                    _ie.emit_intel("traffic_summary", _ts_rows, bulk=True)
+            except Exception:
+                pass
 
     def write_inventory(self, kind: str, data: list | dict) -> None:
         p = self.inventory_dir / f"{kind}.json"
