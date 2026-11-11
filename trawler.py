@@ -395,16 +395,17 @@ class OutputManager:
         if not self.findings_csv.exists():
             self._write_csv_header()
         self._fdb = None
-        _db_path = os.environ.get("PR0T31N_FINDINGS_DB")
-        if _db_path:
-            try:
-                import sys as _s
-                if "/opt/pr0t31n/shared" not in _s.path:
-                    _s.path.insert(0, "/opt/pr0t31n/shared")
-                import pr0t31n_findings_db
-                self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
-            except Exception:
-                self._fdb = None
+        _db_path = os.environ.get("PR0T31N_FINDINGS_DB") or str(self.root / "findings.db")
+        try:
+            import sys as _s
+            if "/opt/pr0t31n/shared" not in _s.path:
+                _s.path.insert(0, "/opt/pr0t31n/shared")
+            import pr0t31n_findings_db
+            self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
+        except Exception:
+            self._fdb = None
+        if self._fdb and _ie:
+            _ie.init_db(self._fdb)
 
     def _hdr(self, what: str) -> str:
         return (f"{'='*70}\n  trawler — {what}\n"
@@ -492,14 +493,14 @@ class OutputManager:
             except Exception:
                 existing = []
             existing.append(entry)
-            tmp = self.findings_json.with_suffix(".tmp")
-            tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-            tmp.replace(self.findings_json)
             if self._fdb:
                 try:
                     self._fdb.insert_finding(entry)
                 except Exception:
                     pass
+            tmp = self.findings_json.with_suffix(".tmp")
+            tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            tmp.replace(self.findings_json)
             with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=self.CSV_FIELDS,
                                extrasaction="ignore").writerow(entry)
@@ -527,9 +528,7 @@ class OutputManager:
             json.dumps({"hosts": hosts}, indent=2), encoding="utf-8")
 
     def write_traffic(self, per_host: dict) -> None:
-        self.traffic_json.write_text(
-            json.dumps(per_host, indent=2), encoding="utf-8")
-        if _ie and _CRUCIBLE_MANAGED and per_host:
+        if _ie and per_host:
             try:
                 _tc_rows = []
                 for _t_ip, _t_data in per_host.items():
@@ -550,6 +549,8 @@ class OutputManager:
                     _ie.emit_intel("traffic_conversation", _tc_rows, bulk=True)
             except Exception:
                 pass
+        self.traffic_json.write_text(
+            json.dumps(per_host, indent=2), encoding="utf-8")
 
     def write_summary(self, summary: dict) -> None:
         summary["scan_meta"] = {
@@ -558,9 +559,7 @@ class OutputManager:
             "generated": _iso(),
             "scope":     self.scope,
         }
-        self.summary_json.write_text(
-            json.dumps(summary, indent=2), encoding="utf-8")
-        if _ie and _CRUCIBLE_MANAGED and summary:
+        if _ie and summary:
             try:
                 _ts_rows = []
                 for _sk, _sv in summary.items():
@@ -580,6 +579,8 @@ class OutputManager:
                     _ie.emit_intel("traffic_summary", _ts_rows, bulk=True)
             except Exception:
                 pass
+        self.summary_json.write_text(
+            json.dumps(summary, indent=2), encoding="utf-8")
 
     def write_inventory(self, kind: str, data: list | dict) -> None:
         p = self.inventory_dir / f"{kind}.json"
